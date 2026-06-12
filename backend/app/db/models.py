@@ -94,13 +94,15 @@ class Prediction(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     symbol_id: Mapped[int] = mapped_column(ForeignKey("symbols.id"), index=True)
-    timestamp: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        index=True,
-    )
+    timestamp: Mapped[datetime] = mapped_column(DateTime, index=True)
 
     model_name: Mapped[str] = mapped_column(String(100))
     model_version: Mapped[str] = mapped_column(String(50))
+
+    horizon_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    probability_up: Mapped[float | None] = mapped_column(Float, nullable=True)
+    predicted_class: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     predicted_return: Mapped[float] = mapped_column(Float)
     confidence: Mapped[float] = mapped_column(Float)
