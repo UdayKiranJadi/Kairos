@@ -1,0 +1,32 @@
+[project]
+name = "tradeops-ai-backend"
+version = "0.1.0"
+description = "Production-style multi-agent intraday paper trading system"
+requires-python = ">=3.11"
+
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "pydantic",
+    "pydantic-settings",
+    "sqlalchemy",
+    "alembic",
+    "asyncpg",
+    "psycopg[binary]",
+    "redis",
+    "pandas",
+    "numpy",
+    "scikit-learn",
+    "alpaca-py",
+    "gymnasium",
+    "stable-baselines3",
+    "torch",
+    "httpx",
+    "python-dotenv",
+    "structlog",
+    "pytest"
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

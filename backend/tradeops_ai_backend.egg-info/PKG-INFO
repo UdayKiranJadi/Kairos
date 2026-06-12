@@ -1,0 +1,25 @@
+Metadata-Version: 2.4
+Name: tradeops-ai-backend
+Version: 0.1.0
+Summary: Production-style multi-agent intraday paper trading system
+Requires-Python: >=3.11
+Requires-Dist: fastapi
+Requires-Dist: uvicorn[standard]
+Requires-Dist: pydantic
+Requires-Dist: pydantic-settings
+Requires-Dist: sqlalchemy
+Requires-Dist: alembic
+Requires-Dist: asyncpg
+Requires-Dist: psycopg[binary]
+Requires-Dist: redis
+Requires-Dist: pandas
+Requires-Dist: numpy
+Requires-Dist: scikit-learn
+Requires-Dist: alpaca-py
+Requires-Dist: gymnasium
+Requires-Dist: stable-baselines3
+Requires-Dist: torch
+Requires-Dist: httpx
+Requires-Dist: python-dotenv
+Requires-Dist: structlog
+Requires-Dist: pytest

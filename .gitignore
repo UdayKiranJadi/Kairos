@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment variables / secrets
+.env
+.env.*
+!.env.example
+
+# Database / local infra
+*.db
+*.sqlite
+*.sqlite3
+postgres_data/
+redis_data/
+
+# Docker
+.docker/
+docker-compose.override.yml
+
+# Logs
+*.log
+logs/
+
+# Model/data artifacts
+backend/artifacts/
+backend/data/
+*.pkl
+*.joblib
+*.pt
+*.pth
+*.onnx
+*.csv
+*.parquet
+
+# Frontend
+node_modules/
+dist/
+build/
+.next/
+.vite/
+
+# OS/editor
+.DS_Store
+.idea/
+.vscode/

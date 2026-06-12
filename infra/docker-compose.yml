@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: tradeops-postgres
+    environment:
+      POSTGRES_USER: tradeops
+      POSTGRES_PASSWORD: tradeops
+      POSTGRES_DB: tradeops
+    ports:
+      - "5433:5432"
+    volumes:
+      - tradeops_postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7
+    container_name: tradeops-redis
+    ports:
+      - "6380:6379"
+
+volumes:
+  tradeops_postgres_data:
