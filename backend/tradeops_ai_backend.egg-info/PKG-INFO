@@ -15,6 +15,7 @@ Requires-Dist: redis
 Requires-Dist: pandas
 Requires-Dist: numpy
 Requires-Dist: scikit-learn
+Requires-Dist: joblib
 Requires-Dist: alpaca-py
 Requires-Dist: gymnasium
 Requires-Dist: stable-baselines3
