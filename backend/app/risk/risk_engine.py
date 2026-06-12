@@ -1,5 +1,5 @@
 from app.risk.risk_policy import RiskPolicy
-from app.schemas.trading import TradeAction, TradeDecision, RiskDecision
+from app.schemas.trading import RiskDecision, TradeAction, TradeDecision
 
 
 class RiskEngine:
