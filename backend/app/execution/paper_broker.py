@@ -50,5 +50,5 @@ class PaperBroker:
         """Fetches all current open positions from Alpaca."""
         try:
             return self.client.get_all_positions()
-        except Exception as e:
+        except Exception:
             return []
