@@ -45,3 +45,10 @@ class PaperBroker:
     def close_all_positions(self):
         """Emergency stop: liquidates everything."""
         return self.client.close_all_positions(cancel_orders=True)
+    
+    def get_all_positions(self):
+        """Fetches all current open positions from Alpaca."""
+        try:
+            return self.client.get_all_positions()
+        except Exception as e:
+            return []
