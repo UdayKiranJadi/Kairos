@@ -1,12 +1,39 @@
 """
-trading_env.py — Gymnasium trading environment for Kairos RL agent.
+trading_env.py — Kairos RL trading environment v2.
 
-DESIGN PRINCIPLES:
-- Rewards bounded to [-1, +1] so value function learns stably
-- NaN cleaned at construction time, not observation time
-- No dropna — fill instead, so n_steps never shrinks unexpectedly
-- One trade per episode: buy → hold → sell → terminate
-- Force-close after max_holding_steps (intraday rule)
+KEY DESIGN CHANGE FROM v1:
+v1 problem: agent learns to never buy (entropy collapses,
+            ep_len grows to 600+, policy_gradient ≈ 0).
+
+v2 solution: FORCED ENTRY. Every episode starts with the
+agent already in a long position at the current bar's price.
+The agent only decides: hold or sell (2 actions, not 3).
+
+WHY THIS WORKS:
+The "never trade" collapse happens because BUY has a cost
+and the agent finds safety in never paying it. By forcing
+entry, we remove that escape route. The agent must learn
+WHEN to exit — which is the harder and more valuable skill.
+This mirrors how real momentum strategies work: signals
+trigger entry, the model manages exit timing.
+
+OBSERVATION SPACE (7 dimensions):
+  [0] return_1m        — recent momentum
+  [1] return_5m        — medium momentum  
+  [2] volatility_10m   — market volatility
+  [3] volume_zscore    — volume signal
+  [4] price_vs_vwap    — price vs average
+  [5] holding_steps    — how long in trade (normalized)
+  [6] unrealized_pnl   — current P&L (normalized)
+
+ACTION SPACE (2 discrete):
+  0 = HOLD  — stay in position
+  1 = SELL  — exit position, end episode
+
+REWARD:
+  On HOLD: tiny reward = unrealized_pnl direction signal
+  On SELL: clipped percentage return × 100
+  Force-close at max_holding_steps with same reward
 """
 
 import numpy as np
@@ -38,162 +65,97 @@ class TradingEnv(gym.Env):
 
         missing = [c for c in self.FEATURE_COLS + ["close"] if c not in df.columns]
         if missing:
-            raise ValueError(f"DataFrame missing columns: {missing}")
+            raise ValueError(f"Missing columns: {missing}")
 
-        # Fill NaN with 0 — never drop rows (keeps n_steps stable)
-        # WHY FILL NOT DROP: dropping rows shrinks the dataset unpredictably
-        # and can leave n_steps=1 which breaks gymnasium's checker.
         self.df = df.copy().reset_index(drop=True)
         self.df[self.FEATURE_COLS] = self.df[self.FEATURE_COLS].fillna(0.0)
         self.df["close"] = self.df["close"].ffill().bfill().fillna(100.0)
         self.n_steps = len(self.df)
 
         if self.n_steps < 10:
-            raise ValueError(
-                f"DataFrame too small: {self.n_steps} rows. Need at least 10."
-            )
+            raise ValueError(f"Too few rows: {self.n_steps}")
 
         self.initial_cash = initial_cash
         self.max_holding_steps = max_holding_steps
         self.transaction_cost_pct = transaction_cost_pct
 
-        # 0=HOLD, 1=BUY, 2=SELL
-        self.action_space = spaces.Discrete(3)
+        # 2 actions: 0=HOLD, 1=SELL
+        self.action_space = spaces.Discrete(2)
 
-        # 8 dimensions: 5 market features + 3 position features
-        # All bounded [-5, 5] — neural nets work best with bounded inputs
+        # 7-dim observation
         self.observation_space = spaces.Box(
-            low=-5.0,
-            high=5.0,
-            shape=(8,),
-            dtype=np.float32,
+            low=-5.0, high=5.0, shape=(7,), dtype=np.float32
         )
 
-        # State variables — reset in reset()
-        self._current_step: int = 0
-        self._position: int = 0        # 0=flat, 1=long
-        self._entry_price: float = 0.0
-        self._holding_steps: int = 0
-        self._cash: float = initial_cash
+        self._step = 0
+        self._entry_price = 0.0
+        self._holding_steps = 0
         self._returns: list[float] = []
-
-    # ── Gymnasium interface ──────────────────────────────────────
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
 
-        # Start at a random point in first 70% of data
-        # Leave 30% tail so there's always room to run episodes
-        # WHY RANDOM START: prevents overfitting to session-open patterns
-        max_start = max(0, int(self.n_steps * 0.7) - self.max_holding_steps - 1)
-        if max_start <= 0:
-            self._current_step = 0
-        else:
-            self._current_step = int(self.np_random.integers(0, max_start))
+        # Start anywhere in first 60% of data
+        # Need at least max_holding_steps rows remaining
+        max_start = max(0, int(self.n_steps * 0.6) - self.max_holding_steps - 1)
+        self._step = int(self.np_random.integers(0, max(1, max_start)))
 
-        self._position = 0
-        self._entry_price = 0.0
+        # FORCE ENTRY: agent starts already in a position
+        # Entry price includes transaction cost
+        entry_bar = self.df.iloc[self._step]
+        self._entry_price = float(entry_bar["close"]) * (1.0 + self.transaction_cost_pct)
         self._holding_steps = 0
-        self._cash = self.initial_cash
         self._returns = []
 
-        return self._get_obs(), {}
+        # Advance one step so first obs is AFTER entry
+        self._step += 1
+
+        return self._obs(), {}
 
     def step(self, action: int):
-        assert self.action_space.contains(action), f"Invalid action {action}"
+        assert self.action_space.contains(action)
 
-        # Guard: if we somehow ran out of data, truncate
-        if self._current_step >= self.n_steps:
-            return self._get_obs(), 0.0, False, True, {}
+        if self._step >= self.n_steps:
+            return self._obs(), 0.0, False, True, {}
 
-        row = self.df.iloc[self._current_step]
+        row = self.df.iloc[self._step]
         price = float(row["close"])
-        reward = 0.0
         terminated = False
+        reward = 0.0
 
-        # ── BUY ─────────────────────────────────────────────────
-        if action == 1:
-            if self._position == 0:
-                # Enter long. Entry price includes transaction cost.
-                self._position = 1
-                self._entry_price = price * (1.0 + self.transaction_cost_pct)
-                self._holding_steps = 0
-                # Small entry cost — agent must earn this back
-                reward = -0.01
-            else:
-                # Already holding — invalid action
-                reward = -0.01
+        if action == 1:  # SELL
+            exit_price = price * (1.0 - self.transaction_cost_pct)
+            trade_return = (exit_price - self._entry_price) / self._entry_price
+            self._returns.append(trade_return)
 
-        # ── SELL ────────────────────────────────────────────────
-        elif action == 2:
-            if self._position == 1:
+            # Reward: percentage return scaled to [-1, 1]
+            # 1% profit → +1.0, 1% loss → -1.0
+            reward = float(np.clip(trade_return * 100.0, -1.0, 1.0))
+            terminated = True
+
+        else:  # HOLD
+            self._holding_steps += 1
+            unrealized = (price - self._entry_price) / self._entry_price
+
+            # Small signal: positive when winning, negative when losing
+            # Teaches agent to cut losses and let winners run
+            reward = float(np.clip(unrealized * 5.0, -0.05, 0.05))
+
+            # Force-close at max_holding_steps
+            if self._holding_steps >= self.max_holding_steps:
                 exit_price = price * (1.0 - self.transaction_cost_pct)
                 trade_return = (exit_price - self._entry_price) / self._entry_price
-
-                self._cash = self.initial_cash * (1.0 + trade_return)
-                self._position = 0
-                self._entry_price = 0.0
-                self._holding_steps = 0
                 self._returns.append(trade_return)
-
-                # Reward = clipped return × 100
-                # 1% gain  → reward +1.0
-                # 1% loss  → reward -1.0
-                # WHY × 100: raw return (0.01) is too small for the value
-                # function to learn from. Scale makes signal clear.
                 reward = float(np.clip(trade_return * 100.0, -1.0, 1.0))
-
-                # Asymmetric nudge: reward winners, punish losers
-                if trade_return > 0.001:
-                    reward += 0.1
-                elif trade_return < -0.001:
-                    reward -= 0.1
-
-                reward = float(np.clip(reward, -1.0, 1.0))
                 terminated = True
 
-            else:
-                # Nothing to sell — invalid action
-                reward = -0.01
+        self._step += 1
+        truncated = self._step >= self.n_steps
 
-        # ── HOLD ────────────────────────────────────────────────
-        else:  # action == 0
-            if self._position == 1:
-                self._holding_steps += 1
-                unrealized = (price - self._entry_price) / self._entry_price
-                # Small reward tracks P&L direction while holding
-                reward = float(np.clip(unrealized * 10.0, -0.1, 0.1))
+        return self._obs(), reward, bool(terminated), bool(truncated), self._info(price)
 
-                # Force-close at max holding steps (intraday rule)
-                if self._holding_steps >= self.max_holding_steps:
-                    exit_price = price * (1.0 - self.transaction_cost_pct)
-                    trade_return = (exit_price - self._entry_price) / self._entry_price
-                    self._cash = self.initial_cash * (1.0 + trade_return)
-                    self._position = 0
-                    self._holding_steps = 0
-                    self._returns.append(trade_return)
-                    reward = float(np.clip(trade_return * 100.0, -1.0, 1.0))
-                    terminated = True
-            else:
-                # Flat: tiny penalty to incentivize seeking trades
-                # Small enough (-0.001) that it won't cause panic-buying
-                reward = -0.001
-
-        self._current_step += 1
-        truncated = self._current_step >= self.n_steps
-
-        return (
-            self._get_obs(),
-            float(reward),
-            bool(terminated),
-            bool(truncated),
-            self._get_info(price),
-        )
-
-    # ── Private helpers ──────────────────────────────────────────
-
-    def _get_obs(self) -> np.ndarray:
-        idx = min(self._current_step, self.n_steps - 1)
+    def _obs(self) -> np.ndarray:
+        idx = min(self._step, self.n_steps - 1)
         row = self.df.iloc[idx]
 
         market = np.array(
@@ -201,11 +163,18 @@ class TradingEnv(gym.Env):
             dtype=np.float32,
         )
 
+        price = float(row["close"])
+        unrealized = 0.0
+        if self._entry_price > 0:
+            unrealized = float(np.clip(
+                (price - self._entry_price) / self._entry_price * 10.0,
+                -1.0, 1.0
+            ))
+
         position = np.array(
             [
-                float(self._position),
                 float(self._holding_steps) / float(self.max_holding_steps),
-                self._unrealized(row),
+                unrealized,
             ],
             dtype=np.float32,
         )
@@ -214,27 +183,18 @@ class TradingEnv(gym.Env):
             np.concatenate([market, position]), -5.0, 5.0
         ).astype(np.float32)
 
-    def _unrealized(self, row) -> float:
-        if self._position == 0 or self._entry_price == 0.0:
-            return 0.0
-        pnl = (float(row["close"]) - self._entry_price) / self._entry_price
-        return float(np.clip(pnl * 10.0, -1.0, 1.0))
-
-    def _get_info(self, price: float) -> dict:
+    def _info(self, price: float) -> dict:
         return {
-            "step":          self._current_step,
-            "position":      self._position,
+            "step":          self._step,
             "holding_steps": self._holding_steps,
             "entry_price":   self._entry_price,
             "current_price": price,
-            "cash":          self._cash,
         }
 
     def _get_episode_sharpe(self) -> float:
         if len(self._returns) < 2:
             return 0.0
         r = np.array(self._returns)
-        std = r.std()
-        if std == 0.0:
+        if r.std() == 0:
             return 0.0
-        return float(r.mean() / std * np.sqrt(252))
+        return float(r.mean() / r.std() * np.sqrt(252))
