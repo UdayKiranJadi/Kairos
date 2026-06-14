@@ -1,57 +1,27 @@
 """
 trading_env.py — Gymnasium trading environment for Kairos RL agent.
 
-THE CORE IDEA:
-We wrap the trading problem as a standard RL environment.
-At each timestep the agent sees market state, picks an action,
-and receives a reward. Over thousands of episodes it learns
-which actions lead to profit.
-
-WHY GYMNASIUM NOT CUSTOM:
-Gymnasium is the industry standard for RL environments.
-Using it means we get:
-  - Compatible with any SB3 algorithm (PPO, SAC, TD3)
-  - Built-in validation via gymnasium.utils.env_checker
-  - Easy to swap algorithms without changing the env
-
-OBSERVATION SPACE (what the agent sees — 8 numbers):
+OBSERVATION SPACE (8 numbers):
   [0] return_1m        — 1-minute price return
   [1] return_5m        — 5-minute price return
   [2] volatility_10m   — 10-min rolling volatility
   [3] volume_zscore    — volume vs recent average
   [4] price_vs_vwap    — position relative to VWAP
   [5] position_held    — are we currently in a trade? (0 or 1)
-  [6] holding_steps    — how long have we held? (normalized)
+  [6] holding_steps    — how long have we held? (normalized 0→1)
   [7] unrealized_pnl   — current trade P&L (normalized)
 
-WHY ADD [5][6][7]:
-The market features alone are not enough. The agent also
-needs to know its own state. Without [5], it can't know
-whether to EXIT (no point exiting if not holding).
-Without [6], it might hold forever. Without [7], it can't
-decide when a trade is profitable enough to close.
+ACTION SPACE (3 discrete):
+  0 = HOLD
+  1 = BUY  (enter long if flat)
+  2 = SELL (exit if holding)
 
-ACTION SPACE (what the agent can do — 3 discrete choices):
-  0 = HOLD    — do nothing
-  1 = BUY     — enter a long position (if not already in one)
-  2 = SELL    — exit the position (if holding one)
-
-WHY DISCRETE NOT CONTINUOUS:
-Continuous actions (position sizing) are harder to train
-and less stable. We start discrete: in or out, one position
-at a time. This mirrors your existing RiskPolicy (max 1 position).
-We can add continuous sizing later (Day 6+).
-
-REWARD FUNCTION:
-  Per-step: small negative reward for holding (time decay)
-  On sell:  Sharpe-adjusted return = return / volatility
-  On bad action: small penalty (buy when already holding, etc.)
-
-WHY SHARPE-ADJUSTED:
-Raw P&L reward → agent learns to gamble (high variance wins).
-Sharpe reward  → agent learns consistency (profit per unit risk).
-This is exactly what your RiskPolicy enforces manually —
-we're teaching the agent to internalize that preference.
+REWARD:
+  Buy:       small transaction cost penalty
+  Sell:      Sharpe-adjusted return (trade_return / volatility)
+  Hold long: tiny unrealized P&L signal
+  Hold flat: zero
+  Invalid:   small penalty (buy when holding, sell when flat)
 """
 
 import numpy as np
@@ -65,21 +35,18 @@ class TradingEnv(gym.Env):
     Single-asset intraday trading environment.
 
     Args:
-        df: DataFrame with columns [timestamp, return_1m, return_5m,
-            volatility_10m, volume_zscore, price_vs_vwap, close]
-            ordered oldest → newest. This is exactly what
-            PredictionDatasetBuilder.load_feature_price_frame() returns.
+        df: DataFrame with columns [return_1m, return_5m,
+            volatility_10m, volume_zscore, price_vs_vwap, close].
+            Produced by PredictionDatasetBuilder.load_feature_price_frame().
+            Must be pre-cleaned (no NaNs).
 
-        initial_cash: Starting capital for the episode.
-        max_holding_steps: Force-close position after this many steps.
-            Prevents the agent from holding overnight (intraday rule).
-        transaction_cost_pct: Slippage + commission per trade.
-            0.001 = 0.1% round-trip (realistic for paper trading).
+        initial_cash: Starting capital per episode.
+        max_holding_steps: Force-close after this many steps (intraday rule).
+        transaction_cost_pct: Slippage + commission per trade (0.001 = 0.1%).
     """
 
     metadata = {"render_modes": []}
 
-    # Feature columns from your existing FeatureBuilder
     FEATURE_COLS = [
         "return_1m",
         "return_5m",
@@ -97,7 +64,7 @@ class TradingEnv(gym.Env):
     ):
         super().__init__()
 
-        # Validate input
+        # Validate columns
         missing = [c for c in self.FEATURE_COLS + ["close"] if c not in df.columns]
         if missing:
             raise ValueError(f"DataFrame missing columns: {missing}")
@@ -108,15 +75,11 @@ class TradingEnv(gym.Env):
         self.max_holding_steps = max_holding_steps
         self.transaction_cost_pct = transaction_cost_pct
 
-        # --- Action space ---
-        # 0=HOLD, 1=BUY, 2=SELL
+        # Action: 0=HOLD, 1=BUY, 2=SELL
         self.action_space = spaces.Discrete(3)
 
-        # --- Observation space ---
-        # 5 market features + 3 position features = 8 dimensions
-        # All bounded to [-5, 5] after normalization.
-        # WHY BOUNDED: SB3 algorithms work best with bounded obs spaces.
-        # Unbounded spaces cause gradient explosion during training.
+        # Observation: 5 market features + 3 position features
+        # Bounded to [-5, 5] — prevents gradient explosion in PPO
         self.observation_space = spaces.Box(
             low=-5.0,
             high=5.0,
@@ -124,37 +87,35 @@ class TradingEnv(gym.Env):
             dtype=np.float32,
         )
 
-        # State is initialized in reset()
+        # State variables — initialized properly in reset()
         self._current_step = 0
-        self._position = 0          # 0=flat, 1=long
+        self._position = 0
         self._entry_price = 0.0
         self._holding_steps = 0
         self._cash = initial_cash
-        self._portfolio_value = initial_cash
-        self._returns: list[float] = []  # track per-step returns for Sharpe
+        self._returns: list[float] = []
 
-    # ── Gymnasium interface ─────────────────────────────────────
+    # ── Gymnasium interface ──────────────────────────────────────────────
 
-    def reset(self, seed=None, options=None):
-       super().reset(seed=seed)
+    def reset(self, seed: int | None = None, options: dict | None = None):
+        """
+        Reset to start of a new episode.
 
-    # Guarantee at least (max_holding_steps + 20) steps remaining
-    # after the random start. This prevents immediate truncation
-    # which breaks gymnasium's determinism checker.
-       min_steps_needed = self.max_holding_steps + 20
-       max_start = max(0, self.n_steps - min_steps_needed)
+        WHY RANDOM START:
+        Always starting at step 0 causes the agent to overfit
+        to early-session patterns. Random start exposes it to
+        all market conditions (open, mid-session, close).
+        """
+        super().reset(seed=seed)
 
-       if max_start == 0:
-        # DataFrame too short — always start at 0
-        self._current_step = 0
-       else:
+        # Start in first 80% so there's always room to run
+        max_start = max(1, int(self.n_steps * 0.8))
         self._current_step = int(self.np_random.integers(0, max_start))
 
         self._position = 0
         self._entry_price = 0.0
         self._holding_steps = 0
         self._cash = self.initial_cash
-        self._portfolio_value = self.initial_cash
         self._returns = []
 
         return self._get_observation(), {}
@@ -163,47 +124,36 @@ class TradingEnv(gym.Env):
         """
         Execute one timestep.
 
-        Args:
-            action: 0=HOLD, 1=BUY, 2=SELL
-
-        Returns:
-            observation, reward, terminated, truncated, info
+        Returns: (observation, reward, terminated, truncated, info)
         """
         assert self.action_space.contains(action), f"Invalid action: {action}"
 
         row = self.df.iloc[self._current_step]
         current_price = float(row["close"])
-
         reward = 0.0
         terminated = False
 
-        # --- Execute action ---
-        if action == 1:  # BUY
+        # ── BUY ─────────────────────────────────────────────────────────
+        if action == 1:
             if self._position == 0:
-                # Enter long: spend all cash on shares
-                # Transaction cost simulates slippage + commission
-                cost = current_price * (1 + self.transaction_cost_pct)
-                shares = self._cash / cost
-
+                # Enter long — pay transaction cost
                 self._position = 1
                 self._entry_price = current_price
                 self._holding_steps = 0
                 self._cash = 0.0
-
-                # Small penalty for buying — agent must earn it back
-                # WHY: prevents the agent from churning in/out constantly
+                # Cost penalty — agent must earn this back to profit
                 reward = -self.transaction_cost_pct
 
             else:
-                # Tried to buy when already holding → invalid action penalty
-                # WHY PENALTY NOT IGNORE: if we ignore it, the agent learns
-                # to spam BUY with no consequence. Penalty teaches it to
-                # check its state before acting.
+                # Already holding — invalid action
+                # WHY PENALIZE: without penalty, agent spams BUY
+                # with zero consequence and never learns state awareness
                 reward = -0.005
 
-        elif action == 2:  # SELL
+        # ── SELL ─────────────────────────────────────────────────────────
+        elif action == 2:
             if self._position == 1:
-                # Exit long: calculate return
+                # Exit long — compute Sharpe-adjusted reward
                 exit_price = current_price * (1 - self.transaction_cost_pct)
                 trade_return = (exit_price - self._entry_price) / self._entry_price
 
@@ -212,36 +162,39 @@ class TradingEnv(gym.Env):
                 self._entry_price = 0.0
                 self._holding_steps = 0
 
-                # Sharpe-adjusted reward
-                # WHY: raw return rewards gambling; dividing by volatility
-                # rewards the same return achieved with less risk
-                volatility = float(row["volatility_10m"]) or 0.001
-                reward = trade_return / (volatility + 1e-8)
+                # Sharpe adjustment: same return is better if achieved
+                # with lower volatility — teaches risk-adjusted thinking
+                # Floor at 0.0005 prevents division explosion on tiny vol
+                volatility = max(
+                    float(row["volatility_10m"]) if not pd.isna(row["volatility_10m"]) else 0.001,
+                    0.0005,
+                )
+                reward = float(np.clip(trade_return / volatility, -10.0, 10.0))
 
-                # Bonus for positive trade, extra penalty for loss
-                # This asymmetry mimics your RiskPolicy loss aversion
+                # Asymmetric bonus/penalty mirrors your RiskPolicy loss aversion
                 if trade_return > 0:
                     reward += 0.01
                 else:
                     reward -= 0.02
 
                 self._returns.append(trade_return)
-                terminated = True  # end episode after each trade
+                terminated = True  # one trade = one episode
 
             else:
-                # Tried to sell when flat → penalty
+                # Tried to sell when flat — invalid
                 reward = -0.005
 
-        else:  # HOLD (action == 0)
+        # ── HOLD ─────────────────────────────────────────────────────────
+        else:
             if self._position == 1:
-                # Holding: small time-decay penalty
-                # WHY: without this, agent learns to hold forever.
-                # Penalizing time teaches it to take profits.
                 self._holding_steps += 1
-                unrealized = (current_price - self._entry_price) / self._entry_price
-                reward = unrealized * 0.001  # tiny reward for floating profit
 
-                # Force close if held too long (intraday rule)
+                # Small unrealized P&L signal while holding
+                unrealized = (current_price - self._entry_price) / self._entry_price
+                reward = float(unrealized * 0.001)
+
+                # Force-close at max holding steps (intraday rule)
+                # WHY: prevents agent learning to hold indefinitely
                 if self._holding_steps >= self.max_holding_steps:
                     exit_price = current_price * (1 - self.transaction_cost_pct)
                     trade_return = (exit_price - self._entry_price) / self._entry_price
@@ -251,8 +204,8 @@ class TradingEnv(gym.Env):
                     self._returns.append(trade_return)
                     terminated = True
             else:
-                # Flat and holding: zero reward
-                # Agent must find opportunities, not sit idle forever
+                # Flat and waiting — zero reward
+                # Agent must find opportunities; idle = neutral
                 reward = 0.0
 
         # Advance time
@@ -262,36 +215,37 @@ class TradingEnv(gym.Env):
         obs = self._get_observation()
         info = self._get_info(current_price)
 
-        return obs, reward, terminated, truncated, info
+        return obs, float(reward), terminated, truncated, info
 
-    # ── Private helpers ─────────────────────────────────────────
+    # ── Private helpers ──────────────────────────────────────────────────
 
     def _get_observation(self) -> np.ndarray:
         """
-        Build the 8-dimensional observation vector.
-
-        Market features come from your FeatureBuilder columns.
-        Position features tell the agent its own state.
+        Build 8-dimensional observation vector.
+        NaN-safe: missing values replaced with 0.0.
         All values clipped to [-5, 5] to match observation_space.
         """
-        # Guard: if we've run out of data, return zeros
         if self._current_step >= self.n_steps:
             return np.zeros(8, dtype=np.float32)
 
         row = self.df.iloc[self._current_step]
 
-        # 5 market features (already normalized by FeatureBuilder)
+        # 5 market features — NaN-safe extraction
+        # pd.isna() catches both float('nan') and None
         market_obs = np.array(
-            [float(row.get(col, 0.0) or 0.0) for col in self.FEATURE_COLS],
+            [
+                0.0 if pd.isna(v := row.get(col, 0.0)) else float(v)
+                for col in self.FEATURE_COLS
+            ],
             dtype=np.float32,
         )
 
-        # 3 position features (normalize to [-1, 1] range)
+        # 3 position features — agent's self-knowledge
         position_obs = np.array(
             [
-                float(self._position),                              # 0 or 1
-                self._holding_steps / self.max_holding_steps,       # 0→1
-                self._get_unrealized_pnl(row),                      # float
+                float(self._position),                          # 0=flat, 1=long
+                self._holding_steps / self.max_holding_steps,   # 0.0 → 1.0
+                self._get_unrealized_pnl(row),                  # fraction of entry
             ],
             dtype=np.float32,
         )
@@ -300,35 +254,35 @@ class TradingEnv(gym.Env):
         return np.clip(obs, -5.0, 5.0).astype(np.float32)
 
     def _get_unrealized_pnl(self, row) -> float:
-        """Current unrealized P&L as a fraction of entry price."""
+        """Unrealized P&L as fraction of entry price. 0.0 if flat."""
         if self._position == 0 or self._entry_price == 0:
             return 0.0
         current_price = float(row["close"])
-        return (current_price - self._entry_price) / self._entry_price
+        return float(np.clip(
+            (current_price - self._entry_price) / self._entry_price,
+            -5.0, 5.0
+        ))
 
     def _get_info(self, current_price: float) -> dict:
-        """
-        Extra info returned with each step.
-        Not used by SB3 for training but useful for logging + debugging.
-        """
+        """Debug info returned with each step. Not used by SB3 for training."""
         return {
-            "step":           self._current_step,
-            "position":       self._position,
-            "holding_steps":  self._holding_steps,
-            "entry_price":    self._entry_price,
-            "current_price":  current_price,
-            "cash":           self._cash,
+            "step":          self._current_step,
+            "position":      self._position,
+            "holding_steps": self._holding_steps,
+            "entry_price":   self._entry_price,
+            "current_price": current_price,
+            "cash":          self._cash,
         }
 
-    def _get_episode_sharpe(self) -> float:
+    def get_episode_sharpe(self) -> float:
         """
-        Sharpe ratio for the completed episode.
-        Used after training to evaluate agent quality.
-        Higher = better. >1.0 is our target before going live.
+        Sharpe ratio for completed episode.
+        Target before going live: > 1.0 consistently.
         """
         if len(self._returns) < 2:
             return 0.0
         r = np.array(self._returns)
         if r.std() == 0:
             return 0.0
-        return float(r.mean() / r.std() * np.sqrt(252))
+        # Annualized: sqrt(252 trading days * 390 minutes/day)
+        return float(r.mean() / r.std() * np.sqrt(252 * 390))
