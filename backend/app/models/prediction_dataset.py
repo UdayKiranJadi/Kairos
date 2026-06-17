@@ -7,12 +7,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import FeatureSnapshot, MarketBar, Symbol
 
 
+# NEW
 FEATURE_COLUMNS = [
     "return_1m",
     "return_5m",
     "volatility_10m",
     "volume_zscore",
     "price_vs_vwap",
+    "rsi_14",
+    "macd_signal",
+    "obv_zscore",
 ]
 
 
@@ -52,6 +56,9 @@ class PredictionDatasetBuilder:
                 FeatureSnapshot.volatility_10m,
                 FeatureSnapshot.volume_zscore,
                 FeatureSnapshot.price_vs_vwap,
+                FeatureSnapshot.rsi_14,        # NEW
+               FeatureSnapshot.macd_signal,   # NEW
+        FeatureSnapshot.obv_zscore,
                 MarketBar.close,
             )
             .join(
@@ -86,6 +93,9 @@ class PredictionDatasetBuilder:
                 "volatility_10m",
                 "volume_zscore",
                 "price_vs_vwap",
+                "rsi_14",        # NEW
+        "macd_signal",   # NEW
+        "obv_zscore",    # NEW
                 "close",
             ],
         )

@@ -42,12 +42,15 @@ class RLAgent:
 
     # Matches TradingEnv.FEATURE_COLS
     FEATURE_COLS = [
-        "return_1m",
-        "return_5m",
-        "volatility_10m",
-        "volume_zscore",
-        "price_vs_vwap",
-    ]
+    "return_1m",
+    "return_5m",
+    "volatility_10m",
+    "volume_zscore",
+    "price_vs_vwap",
+    "rsi_14",
+    "macd_signal",
+    "obv_zscore",
+]
 
     def __init__(self, model_path: str | Path | None = None):
         if model_path is None:

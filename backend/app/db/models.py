@@ -69,7 +69,6 @@ class MarketBar(Base):
 
     symbol: Mapped["Symbol"] = relationship(back_populates="bars")
 
-
 class FeatureSnapshot(Base):
     __tablename__ = "feature_snapshots"
 
@@ -80,11 +79,17 @@ class FeatureSnapshot(Base):
         index=True,
     )
 
-    return_1m: Mapped[float | None] = mapped_column(Float, nullable=True)
-    return_5m: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Original 5 features
+    return_1m:      Mapped[float | None] = mapped_column(Float, nullable=True)
+    return_5m:      Mapped[float | None] = mapped_column(Float, nullable=True)
     volatility_10m: Mapped[float | None] = mapped_column(Float, nullable=True)
-    volume_zscore: Mapped[float | None] = mapped_column(Float, nullable=True)
-    price_vs_vwap: Mapped[float | None] = mapped_column(Float, nullable=True)
+    volume_zscore:  Mapped[float | None] = mapped_column(Float, nullable=True)
+    price_vs_vwap:  Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    # New features (RSI, MACD, OBV)
+    rsi_14:      Mapped[float | None] = mapped_column(Float, nullable=True)
+    macd_signal: Mapped[float | None] = mapped_column(Float, nullable=True)
+    obv_zscore:  Mapped[float | None] = mapped_column(Float, nullable=True)
 
     symbol: Mapped["Symbol"] = relationship()
 

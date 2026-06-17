@@ -17,6 +17,7 @@ from app.rl.trading_env import TradingEnv
 def make_dummy_df(n: int = 400) -> pd.DataFrame:
     rng = np.random.default_rng(42)
     closes = 150.0 + np.cumsum(rng.normal(0, 0.3, n))
+    returns = np.diff(closes, prepend=closes[0]) / closes
     return pd.DataFrame({
         "timestamp":      pd.date_range("2026-01-01 09:30", periods=n, freq="1min"),
         "return_1m":      rng.normal(0, 0.001, n),
@@ -24,9 +25,11 @@ def make_dummy_df(n: int = 400) -> pd.DataFrame:
         "volatility_10m": np.abs(rng.normal(0.003, 0.001, n)) + 0.001,
         "volume_zscore":  rng.normal(0, 1, n),
         "price_vs_vwap":  rng.normal(0, 0.002, n),
+        "rsi_14":         rng.uniform(-1, 1, n),
+        "macd_signal":    rng.normal(0, 0.5, n),
+        "obv_zscore":     rng.normal(0, 1, n),
         "close":          closes,
     })
-
 
 async def load_real_df(ticker: str) -> pd.DataFrame:
     async with AsyncSessionLocal() as session:

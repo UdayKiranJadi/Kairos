@@ -46,13 +46,18 @@ class TradingEnv(gym.Env):
 
     metadata = {"render_modes": []}
 
+    
+    # NEW — 8 features
     FEATURE_COLS = [
-        "return_1m",
-        "return_5m",
-        "volatility_10m",
-        "volume_zscore",
-        "price_vs_vwap",
-    ]
+    "return_1m",
+    "return_5m",
+    "volatility_10m",
+    "volume_zscore",
+    "price_vs_vwap",
+    "rsi_14",
+    "macd_signal",
+    "obv_zscore",
+]
 
     def __init__(
         self,
@@ -83,9 +88,10 @@ class TradingEnv(gym.Env):
         self.action_space = spaces.Discrete(2)
 
         # 7-dim observation
+        # NEW
         self.observation_space = spaces.Box(
-            low=-5.0, high=5.0, shape=(7,), dtype=np.float32
-        )
+    low=-5.0, high=5.0, shape=(10,), dtype=np.float32
+)
 
         self._step = 0
         self._entry_price = 0.0
