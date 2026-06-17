@@ -11,8 +11,8 @@ class DecisionAgent:
     """
     Converts predictions into trade decisions, then sends them to RiskEngine.
 
-    This agent does not execute orders.
-    It only proposes and risk-checks.
+    Day 7 upgrade: accepts optional sentiment_signal from SentimentAgent.
+    Sentiment gate blocks ENTER_LONG if news is strongly bearish.
     """
 
     def __init__(self, db: AsyncSession):
@@ -32,7 +32,6 @@ class DecisionAgent:
             .order_by(Prediction.timestamp.desc())
             .limit(1)
         )
-
         return result.scalar_one_or_none()
 
     def prediction_to_trade_decision(
@@ -79,16 +78,15 @@ class DecisionAgent:
         trades_today: int = 0,
         open_positions: int = 0,
         trading_mode: str = "paper",
+        sentiment_signal: dict | None = None,
     ) -> dict:
         ticker = ticker.upper()
 
         symbol = await self.get_symbol(ticker)
-
         if symbol is None:
             raise ValueError(f"Symbol {ticker} does not exist.")
 
         prediction = await self.get_latest_prediction(symbol.id)
-
         if prediction is None:
             raise ValueError(
                 f"No prediction found for {ticker}. Run PredictionAgent first."
@@ -99,6 +97,45 @@ class DecisionAgent:
             prediction=prediction,
         )
 
+        # ── Sentiment gate ────────────────────────────────────────
+        # Blocks ENTER_LONG when news is strongly bearish.
+        # The RL + LogReg models see price action only.
+        # This layer sees news context they cannot.
+        #
+        # Example: LogReg says ENTER because RSI is oversold,
+        # but GPT-4o says bearish because "Apple raising prices
+        # due to chip crunch" just hit the wire. We hold.
+        #
+        # Gate conditions (all must be true to block):
+        #   - sentiment bias is bearish
+        #   - confidence > 0.65 (not just weak signal)
+        #   - news_impact is high or medium (not noise)
+        if (
+            sentiment_signal is not None
+            and trade_decision.action == TradeAction.ENTER_LONG
+        ):
+            sentiment_bias = sentiment_signal.get("bias", "neutral")
+            sentiment_conf = sentiment_signal.get("confidence", 0.5)
+            news_impact    = sentiment_signal.get("news_impact", "low")
+
+            if (
+                sentiment_bias == "bearish"
+                and sentiment_conf > 0.65
+                and news_impact in ("high", "medium")
+            ):
+                trade_decision = TradeDecision(
+                    symbol=ticker,
+                    action=TradeAction.HOLD,
+                    confidence=trade_decision.confidence,
+                    predicted_return=trade_decision.predicted_return,
+                    reason=(
+                        f"Sentiment gate blocked entry — "
+                        f"{sentiment_signal.get('reasoning', 'bearish news')} "
+                        f"(score={sentiment_signal.get('aggregate_score', 0):+.3f})"
+                    ),
+                )
+
+        # ── Risk check ────────────────────────────────────────────
         risk_decision = self.risk_engine.evaluate(
             decision=trade_decision,
             portfolio_value=portfolio_value,
@@ -119,29 +156,29 @@ class DecisionAgent:
             daily_loss_pct=daily_loss_pct,
             total_drawdown_pct=total_drawdown_pct,
         )
-
         self.db.add(risk_check)
         await self.db.commit()
 
         return {
             "symbol": ticker,
             "prediction": {
-                "timestamp": prediction.timestamp,
-                "probability_up": prediction.probability_up,
-                "confidence": prediction.confidence,
+                "timestamp":        prediction.timestamp,
+                "probability_up":   prediction.probability_up,
+                "confidence":       prediction.confidence,
                 "predicted_return": prediction.predicted_return,
-                "model_name": prediction.model_name,
-                "model_version": prediction.model_version,
+                "model_name":       prediction.model_name,
+                "model_version":    prediction.model_version,
             },
             "trade_decision": {
-                "action": trade_decision.action.value,
-                "confidence": trade_decision.confidence,
+                "action":           trade_decision.action.value,
+                "confidence":       trade_decision.confidence,
                 "predicted_return": trade_decision.predicted_return,
-                "reason": trade_decision.reason,
+                "reason":           trade_decision.reason,
             },
             "risk_decision": {
-                "approved": risk_decision.approved,
-                "reason": risk_decision.reason,
+                "approved":           risk_decision.approved,
+                "reason":             risk_decision.reason,
                 "max_position_value": risk_decision.max_position_value,
             },
+            "sentiment": sentiment_signal,
         }

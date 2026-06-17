@@ -1,20 +1,19 @@
 """
-trading_bot.py — Day 4 upgrade.
+trading_bot.py — Kairos autonomous trading loop.
 
-WHAT CHANGED:
-  1. Circuit breaker checked BEFORE processing any symbol.
-     If daily loss exceeds limit, entire cycle is skipped.
-
-  2. ATR stop-loss checked for open positions each cycle.
-     If price hits stop, EXIT is forced regardless of model.
-
-  3. RL ensemble: LogReg + RL model vote together.
-     Agreement → higher confidence signal.
-     Disagreement → HOLD (skip the trade).
-
-  4. trades_today tracked properly via DB query.
+AGENT STACK (in order of execution each cycle):
+  1. PortfolioAgent   — sync live equity + positions from Alpaca
+  2. RiskEngine       — circuit breaker check (portfolio level)
+  3. BarService       — get latest bar (Redis → REST fallback)
+  4. RiskEngine       — ATR stop-loss check (position level)
+  5. FeatureBuilder   — compute 8 features from recent bars
+  6. SentimentAgent   — FinBERT + GPT-4o news sentiment
+  7. PredictionAgent  — LogReg direction prediction
+  8. RLAgent          — PPO policy signal
+  9. DecisionAgent    — ensemble + sentiment gate + risk check
+  10. ExecutionAgent  — size + submit order via PaperBroker
 """
-from app.core.alerting import alert, AlertLevel
+
 import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
@@ -26,6 +25,8 @@ from app.agents.decision_agent import DecisionAgent
 from app.agents.execution_agent import ExecutionAgent
 from app.agents.portfolio_agent import PortfolioAgent
 from app.agents.prediction_agent import PredictionAgent
+from app.agents.sentiment_agent import SentimentAgent
+from app.core.alerting import AlertLevel, alert
 from app.data.bar_service import BarService
 from app.data.stream_client import get_latest_bar
 from app.db.models import PaperOrder
@@ -42,7 +43,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger("Kairos.Bot")
 
-# Try to load RL agent — graceful fallback if model not found
+# ── Module-level singletons ───────────────────────────────────────
+# Loaded once at startup, reused every cycle.
+
+_sentiment_agent = SentimentAgent()
+
 _rl_agent = None
 try:
     from app.rl.rl_agent import RLAgent
@@ -53,14 +58,6 @@ except Exception as e:
 
 
 class AutonomousBot:
-    """
-    Fully autonomous trading loop with:
-    - Live WebSocket data (Day 1)
-    - LogReg + RL ensemble signals (Day 3/4)
-    - ATR stop-loss per position (Day 4)
-    - Circuit breaker on daily drawdown (Day 4)
-    - Accurate trades_today tracking (Day 4)
-    """
 
     def __init__(self, symbols: list[str]):
         self.symbols = [s.strip().upper() for s in symbols]
@@ -71,14 +68,6 @@ class AutonomousBot:
         return self.broker.client.get_clock().is_open
 
     async def _trades_today(self, db: AsyncSession) -> int:
-        """
-        Count orders submitted today via DB query.
-
-        WHY NOT A COUNTER:
-        A counter resets on bot restart. The DB persists
-        across restarts. This ensures we never exceed
-        max_trades_per_day even after a crash + restart.
-        """
         today_start = datetime.now(timezone.utc).replace(
             hour=0, minute=0, second=0, microsecond=0
         )
@@ -89,36 +78,22 @@ class AutonomousBot:
         )
         return result.scalar() or 0
 
-    async def _compute_atr(self, symbol: str, db: AsyncSession, period: int = 14) -> float:
-        """
-        Compute ATR from recent bars in DB.
-
-        ATR = average of True Range over last N bars.
-        True Range = max(H-L, |H-prev_C|, |L-prev_C|)
-
-        Returns 0.0 if insufficient data.
-        """
+    async def _compute_atr(
+        self, symbol: str, db: AsyncSession, period: int = 14
+    ) -> float:
         bar_service = BarService(db)
         bars = await bar_service.list_recent_bars(symbol, limit=period + 1)
-
         if len(bars) < 2:
             return 0.0
-
-        # bars are returned newest-first, reverse for calculation
         bars = list(reversed(bars))
-
         true_ranges = []
         for i in range(1, len(bars)):
-            high  = bars[i].high
-            low   = bars[i].low
-            prev_close = bars[i-1].close
             tr = max(
-                high - low,
-                abs(high - prev_close),
-                abs(low  - prev_close),
+                bars[i].high - bars[i].low,
+                abs(bars[i].high - bars[i - 1].close),
+                abs(bars[i].low  - bars[i - 1].close),
             )
             true_ranges.append(tr)
-
         return sum(true_ranges) / len(true_ranges) if true_ranges else 0.0
 
     def _apply_rl_ensemble(
@@ -127,40 +102,27 @@ class AutonomousBot:
         logreg_confidence: float,
         latest_features: dict,
     ) -> tuple[str, float, str]:
-        """
-        Combine LogReg and RL signals.
-
-        Logic:
-          No RL model → use LogReg alone
-          RL bearish + LogReg EXIT → EXIT (both agree, high conf)
-          RL bullish + LogReg ENTER → ENTER (both agree)
-          Disagreement → HOLD
-
-        Returns (final_action, final_confidence, reason)
-        """
         if _rl_agent is None:
             return logreg_action, logreg_confidence, "LogReg only (no RL model)"
 
         try:
-            rl_result = _rl_agent.predict(latest_features)
-            rl_bearish = rl_result["action"] == 1  # SELL = bearish
-            rl_conf = rl_result["confidence"]
+            rl_result  = _rl_agent.predict(latest_features)
+            rl_bearish = rl_result["action"] == 1
+            rl_conf    = rl_result["confidence"]
 
             if logreg_action == "EXIT_POSITION" and rl_bearish:
-                # Both agree: exit
-                combined_conf = (logreg_confidence + rl_conf) / 2
-                return "EXIT_POSITION", combined_conf, \
+                combined = (logreg_confidence + rl_conf) / 2
+                return "EXIT_POSITION", combined, \
                     f"Ensemble EXIT: LogReg={logreg_confidence:.2f} RL={rl_conf:.2f}"
 
             if logreg_action == "ENTER_LONG" and not rl_bearish:
-                # Both agree: enter
-                combined_conf = (logreg_confidence + rl_conf) / 2
-                return "ENTER_LONG", combined_conf, \
+                combined = (logreg_confidence + rl_conf) / 2
+                return "ENTER_LONG", combined, \
                     f"Ensemble ENTER: LogReg={logreg_confidence:.2f} RL={rl_conf:.2f}"
 
-            # Disagree → hold
             return "HOLD", 0.5, \
-                f"Ensemble HOLD (disagreement): LogReg={logreg_action} RL={'SELL' if rl_bearish else 'HOLD'}"
+                f"Ensemble HOLD (disagreement): " \
+                f"LogReg={logreg_action} RL={'SELL' if rl_bearish else 'HOLD'}"
 
         except Exception as e:
             logger.warning(f"RL inference failed: {e} — using LogReg only")
@@ -173,24 +135,23 @@ class AutonomousBot:
         live_state: dict,
         trades_today: int,
     ) -> None:
+
         bar_service = BarService(db)
 
-        # ── 1. Get latest bar (Redis → REST fallback) ─────────────
+        # ── 1. Latest bar (Redis → REST fallback) ─────────────────
         latest_bar = await get_latest_bar(symbol)
-
         if latest_bar is None:
             logger.info(f"[{symbol}] No Redis bar — REST fallback")
-            end_time  = datetime.now(timezone.utc)
+            end_time   = datetime.now(timezone.utc)
             start_time = end_time - timedelta(minutes=30)
             await bar_service.store_intraday_bars([symbol], start_time, end_time)
         else:
             logger.info(f"[{symbol}] Redis bar | close={latest_bar['close']:.2f}")
-            end_time  = datetime.now(timezone.utc)
+            end_time   = datetime.now(timezone.utc)
             start_time = end_time - timedelta(minutes=2)
             await bar_service.store_intraday_bars([symbol], start_time, end_time)
 
-        # ── 2. ATR stop-loss check for open positions ─────────────
-        # Check BEFORE prediction so we exit bad trades immediately
+        # ── 2. ATR stop-loss check ────────────────────────────────
         position = self.broker.get_open_position(symbol)
         if position:
             entry_price   = float(position.avg_entry_price)
@@ -204,31 +165,38 @@ class AutonomousBot:
             )
 
             if should_stop:
-               logger.warning(f"[{symbol}] STOP LOSS: {stop_reason}")
-            await alert(
+                logger.warning(f"[{symbol}] STOP LOSS: {stop_reason}")
+                await alert(
                     f"ATR STOP-LOSS: {symbol}\n{stop_reason}",
                     level=AlertLevel.WARNING,
                     subject=f"Stop-loss triggered — {symbol}",
-    )
+                )
+                try:
+                    from alpaca.trading.enums import OrderSide
+                    qty = float(position.qty)
+                    order = self.broker.submit_market_order(
+                        symbol, qty, OrderSide.SELL
+                    )
+                    logger.warning(f"[{symbol}] Emergency exit: {order.id}")
+                except Exception as e:
+                    logger.error(f"[{symbol}] Stop-loss execution failed: {e}")
+                return
 
         # ── 3. Build features ─────────────────────────────────────
-        end_time  = datetime.now(timezone.utc)
+        end_time   = datetime.now(timezone.utc)
         start_time = end_time - timedelta(hours=1)
         feature_builder = FeatureBuilder(db)
-        await feature_builder.store_features_for_symbol(symbol, start_time, end_time)
+        await feature_builder.store_features_for_symbol(
+            symbol, start_time, end_time
+        )
 
-        # ── 4. LogReg prediction ──────────────────────────────────
-        prediction_agent = PredictionAgent(db)
-        try:
-            prediction = await prediction_agent.predict_latest(symbol)
-        except ValueError as e:
-            logger.warning(f"[{symbol}] Prediction skipped: {e}")
-            return
+        # ── 4. Get latest features for RL + sentiment context ─────
+        feature_list = await feature_builder.list_recent_features(
+            symbol, limit=1
+        )
 
-        # ── 5. Ensemble: LogReg + RL ──────────────────────────────
-        # Get latest features for RL observation
-        feature_b = FeatureBuilder(db)
-        feature_list = await feature_b.list_recent_features(symbol, limit=1)
+        latest_features = {}
+        price_context   = {}
 
         if feature_list:
             f = feature_list[0]
@@ -238,11 +206,56 @@ class AutonomousBot:
                 "volatility_10m": f.volatility_10m or 0.0,
                 "volume_zscore":  f.volume_zscore  or 0.0,
                 "price_vs_vwap":  f.price_vs_vwap  or 0.0,
+                "rsi_14":         f.rsi_14         or 0.0,
+                "macd_signal":    f.macd_signal     or 0.0,
+                "obv_zscore":     f.obv_zscore      or 0.0,
+            }
+            # Price context for GPT-4o reasoning
+            recent_bars = await bar_service.list_recent_bars(symbol, limit=1)
+            current_price = recent_bars[0].close if recent_bars else (
+                latest_bar["close"] if latest_bar else 0
+            )
+            price_context = {
+                "close":         current_price,
+                "rsi_14":        f.rsi_14         or 0.0,
+                "macd_signal":   f.macd_signal     or 0.0,
+                "price_vs_vwap": f.price_vs_vwap  or 0.0,
+                "volume_zscore": f.volume_zscore  or 0.0,
             }
         else:
-            latest_features = {}
+            recent_bars   = await bar_service.list_recent_bars(symbol, limit=1)
+            current_price = recent_bars[0].close if recent_bars else (
+                latest_bar["close"] if latest_bar else None
+            )
 
-        # Get LogReg decision first
+        # ── 5. Sentiment signal (FinBERT + GPT-4o) ───────────────
+        # Run in thread — FinBERT and OpenAI are synchronous/blocking
+        try:
+            sentiment_signal = await asyncio.to_thread(
+                _sentiment_agent.get_signal_sync,
+                symbol,
+                price_context,
+            )
+            logger.info(
+                f"[{symbol}] Sentiment | "
+                f"bias={sentiment_signal['bias']} | "
+                f"score={sentiment_signal['aggregate_score']:+.3f} | "
+                f"source={sentiment_signal['source']} | "
+                f"{sentiment_signal['reasoning'][:60]}"
+            )
+        except Exception as e:
+            logger.warning(f"[{symbol}] Sentiment failed: {e} — skipping")
+            sentiment_signal = None
+
+        # ── 6. LogReg prediction ──────────────────────────────────
+        prediction_agent = PredictionAgent(db)
+        try:
+            await prediction_agent.predict_latest(symbol)
+        except ValueError as e:
+            logger.warning(f"[{symbol}] Prediction skipped: {e}")
+            return
+
+        # ── 7. DecisionAgent: LogReg + sentiment gate + risk ──────
         decision_agent = DecisionAgent(db)
         eval_result = await decision_agent.evaluate_latest_prediction(
             ticker=symbol,
@@ -252,17 +265,17 @@ class AutonomousBot:
             trades_today=trades_today,
             open_positions=live_state["open_positions"],
             trading_mode="paper",
+            sentiment_signal=sentiment_signal,
         )
 
-        trade_dict = eval_result["trade_decision"]
+        trade_dict    = eval_result["trade_decision"]
         logreg_action = trade_dict["action"]
         logreg_conf   = trade_dict["confidence"]
 
-        # Apply ensemble
+        # ── 8. RL ensemble ────────────────────────────────────────
         final_action, final_conf, ensemble_reason = self._apply_rl_ensemble(
             logreg_action, logreg_conf, latest_features
         )
-
         logger.info(f"[{symbol}] {ensemble_reason}")
 
         decision_obj = TradeDecision(
@@ -274,20 +287,13 @@ class AutonomousBot:
         )
 
         risk_dict = eval_result["risk_decision"]
-        risk_obj = RiskDecision(
+        risk_obj  = RiskDecision(
             approved=risk_dict["approved"] and final_action != "HOLD",
             reason=risk_dict["reason"],
             max_position_value=risk_dict.get("max_position_value"),
         )
 
-        # ── 6. Execute ────────────────────────────────────────────
-        bar_service2 = BarService(db)
-        recent = await bar_service2.list_recent_bars(symbol, limit=1)
-        current_price = (
-            recent[0].close if recent
-            else (latest_bar["close"] if latest_bar else None)
-        )
-
+        # ── 9. Execute ────────────────────────────────────────────
         if current_price is None:
             logger.warning(f"[{symbol}] No price for sizing — skip")
             return
@@ -296,16 +302,17 @@ class AutonomousBot:
         exec_result = await execution_agent.execute_decision(
             decision_obj, risk_obj, current_price
         )
+
         if exec_result.get("status") == "executed":
-         await alert(
-        f"TRADE EXECUTED: {symbol}\n"
-        f"Side: {exec_result.get('side', '').upper()}\n"
-        f"Qty: {exec_result.get('qty')}\n"
-        f"Price: ${current_price:.2f}\n"
-        f"Portfolio equity: ${live_state['portfolio_value']:.2f}",
-        level=AlertLevel.INFO,
-        subject=f"Trade executed — {symbol}",
-    )
+            await alert(
+                f"TRADE EXECUTED: {symbol}\n"
+                f"Side: {exec_result.get('side', '').upper()}\n"
+                f"Qty: {exec_result.get('qty')}\n"
+                f"Price: ${current_price:.2f}\n"
+                f"Portfolio equity: ${live_state['portfolio_value']:.2f}",
+                level=AlertLevel.INFO,
+                subject=f"Trade executed — {symbol}",
+            )
 
         logger.info(
             f"[{symbol}] "
@@ -317,7 +324,9 @@ class AutonomousBot:
 
     async def start(self) -> None:
         logger.info(f"Kairos starting | symbols={self.symbols}")
-        logger.info(f"RL ensemble: {'active' if _rl_agent else 'inactive (LogReg only)'}")
+        logger.info(
+            f"RL ensemble: {'active' if _rl_agent else 'inactive (LogReg only)'}"
+        )
 
         while True:
             try:
@@ -329,12 +338,10 @@ class AutonomousBot:
                 logger.info("─── Cycle start ───")
 
                 async with AsyncSessionLocal() as session:
-                    # Portfolio sync
                     portfolio_agent = PortfolioAgent(session)
                     live_state = await portfolio_agent.sync_and_get_state()
 
-                    # ── CIRCUIT BREAKER ───────────────────────────
-                    # Check portfolio health BEFORE any trading
+                    # ── Circuit breaker ───────────────────────────
                     should_halt, halt_reason = self.risk_engine.check_circuit_breaker(
                         daily_loss_pct=live_state["daily_loss_pct"],
                         total_drawdown_pct=live_state["total_drawdown_pct"],
@@ -343,16 +350,16 @@ class AutonomousBot:
                     if should_halt:
                         logger.warning(f"CIRCUIT BREAKER: {halt_reason}")
                         await alert(
-                        f"CIRCUIT BREAKER FIRED\n{halt_reason}\nEquity: ${live_state['portfolio_value']:.2f}",
-                        level=AlertLevel.CRITICAL,
-                        subject="Circuit breaker — trading halted",
-    )
+                            f"CIRCUIT BREAKER FIRED\n"
+                            f"{halt_reason}\n"
+                            f"Equity: ${live_state['portfolio_value']:.2f}",
+                            level=AlertLevel.CRITICAL,
+                            subject="Circuit breaker — trading halted",
+                        )
                         await asyncio.sleep(60)
                         continue
 
-                    # Accurate trades_today count
                     trades_today = await self._trades_today(session)
-
                     logger.info(
                         f"Portfolio | "
                         f"equity=${live_state['portfolio_value']:.2f} | "
