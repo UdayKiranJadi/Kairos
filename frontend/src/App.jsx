@@ -160,7 +160,7 @@ export default function App() {
 
   const { portfolio, positions, orders, agent_state, stream, equity_curve } = data
   const pnlColor = (portfolio.daily_pnl || 0) >= 0 ? 'text-green-400' : 'text-red-400'
-  const pnlSign  = (portfolio.daily_pnl || 0) >= 0 ? '+' : ''
+  const pnlSign = (portfolio.daily_pnl || 0) >= 0 ? '+' : ''
 
   // Format equity curve for recharts
   const curveData = (equity_curve || []).map((p, i) => ({
@@ -192,7 +192,8 @@ export default function App() {
       <StreamTicker stream={stream} />
 
       {/* Portfolio metrics */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+      {/* Replace the existing 4-card grid with this 5-card version */}
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
         <MetricCard
           label="Equity"
           value={`$${(portfolio.equity || 0).toFixed(2)}`}
@@ -210,6 +211,15 @@ export default function App() {
           label="Total P&L"
           value={`$${(portfolio.total_pnl || 0).toFixed(2)}`}
           color={(portfolio.total_pnl || 0) >= 0 ? 'text-green-400' : 'text-red-400'}
+        />
+        <MetricCard
+          label="Sharpe ratio"
+          value={(data.sharpe || 0).toFixed(2)}
+          color={
+            (data.sharpe || 0) > 1 ? 'text-green-400' :
+              (data.sharpe || 0) > 0 ? 'text-yellow-400' : 'text-red-400'
+          }
+          sub="annualised · live"
         />
       </div>
 
@@ -327,9 +337,8 @@ export default function App() {
                     {new Date(o.timestamp).toLocaleTimeString()}
                   </td>
                   <td className="p-4 font-bold">{o.ticker}</td>
-                  <td className={`p-4 font-semibold ${
-                    o.side === 'buy' ? 'text-green-400' : 'text-red-400'
-                  }`}>
+                  <td className={`p-4 font-semibold ${o.side === 'buy' ? 'text-green-400' : 'text-red-400'
+                    }`}>
                     {o.side?.toUpperCase()}
                   </td>
                   <td className="p-4">{o.qty}</td>

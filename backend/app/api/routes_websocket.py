@@ -138,6 +138,25 @@ async def _build_payload(db) -> dict:
         for row in reversed(curve_result.all())
     ]
 
+           # ── Sharpe ratio (from last 100 equity snapshots) ────────────
+    sharpe = 0.0
+    try:
+        sharpe_result = await db.execute(
+           select(PortfolioSnapshot.equity)
+           .order_by(desc(PortfolioSnapshot.timestamp))
+           .limit(100)
+    )
+        equity_vals = [row[0] for row in sharpe_result.all()]
+        if len(equity_vals) >= 10:
+            import numpy as np
+            returns = np.diff(list(reversed(equity_vals))) / list(reversed(equity_vals))[:-1]
+            if returns.std() > 0:
+               sharpe = float(returns.mean() / returns.std() * np.sqrt(252 * 390))
+    except Exception:
+    
+        pass
+    
+
     return {
         "timestamp":   datetime.now(timezone.utc).isoformat(),
         "portfolio":   portfolio,
@@ -146,6 +165,7 @@ async def _build_payload(db) -> dict:
         "agent_state": _last_agent_state,
         "stream":      stream_state,
         "equity_curve": equity_curve,
+        "sharpe":       sharpe,
     }
 
 

@@ -23,6 +23,11 @@ class Settings(BaseSettings):
     max_trades_per_day: int = 3
     max_open_positions: int = 1
 
+    slack_webhook_url:      str = ""
+    alert_email_from:       str = ""
+    alert_email_to:         str = ""
+    alert_email_password:   str = ""
+
     class Config:
         env_file = ".env"
 

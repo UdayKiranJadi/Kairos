@@ -14,7 +14,7 @@ WHAT CHANGED:
 
   4. trades_today tracked properly via DB query.
 """
-
+from app.core.alerting import alert, AlertLevel
 import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
@@ -204,16 +204,12 @@ class AutonomousBot:
             )
 
             if should_stop:
-                logger.warning(f"[{symbol}] STOP LOSS: {stop_reason}")
-                # Force exit via broker
-                try:
-                    qty = float(position.qty)
-                    from alpaca.trading.enums import OrderSide
-                    order = self.broker.submit_market_order(symbol, qty, OrderSide.SELL)
-                    logger.warning(f"[{symbol}] Emergency exit order: {order.id}")
-                except Exception as e:
-                    logger.error(f"[{symbol}] Stop-loss execution failed: {e}")
-                return
+               logger.warning(f"[{symbol}] STOP LOSS: {stop_reason}")
+            await alert(
+                    f"ATR STOP-LOSS: {symbol}\n{stop_reason}",
+                    level=AlertLevel.WARNING,
+                    subject=f"Stop-loss triggered — {symbol}",
+    )
 
         # ── 3. Build features ─────────────────────────────────────
         end_time  = datetime.now(timezone.utc)
@@ -300,6 +296,16 @@ class AutonomousBot:
         exec_result = await execution_agent.execute_decision(
             decision_obj, risk_obj, current_price
         )
+        if exec_result.get("status") == "executed":
+         await alert(
+        f"TRADE EXECUTED: {symbol}\n"
+        f"Side: {exec_result.get('side', '').upper()}\n"
+        f"Qty: {exec_result.get('qty')}\n"
+        f"Price: ${current_price:.2f}\n"
+        f"Portfolio equity: ${live_state['portfolio_value']:.2f}",
+        level=AlertLevel.INFO,
+        subject=f"Trade executed — {symbol}",
+    )
 
         logger.info(
             f"[{symbol}] "
@@ -335,7 +341,12 @@ class AutonomousBot:
                     )
 
                     if should_halt:
-                        logger.warning(f"🛑 {halt_reason}")
+                        logger.warning(f"CIRCUIT BREAKER: {halt_reason}")
+                        await alert(
+                        f"CIRCUIT BREAKER FIRED\n{halt_reason}\nEquity: ${live_state['portfolio_value']:.2f}",
+                        level=AlertLevel.CRITICAL,
+                        subject="Circuit breaker — trading halted",
+    )
                         await asyncio.sleep(60)
                         continue
 
