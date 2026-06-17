@@ -1,357 +1,617 @@
 import { useEffect, useState, useRef } from 'react'
 import {
   LineChart, Line, XAxis, YAxis, Tooltip,
-  ResponsiveContainer, ReferenceLine
+  ResponsiveContainer, ReferenceLine, BarChart, Bar
 } from 'recharts'
 
-// ── WebSocket hook ─────────────────────────────────────────────
-function useKairosWS(url) {
+const ACCENT = '#5DCAA5'
+const BLUE = '#378ADD'
+const PURPLE = '#534AB7'
+const AMBER = '#EF9F27'
+const RED = '#E24B4A'
+const DIM = '#2a4060'
+const MID = '#4a6080'
+const LIGHT = '#c8d8e8'
+const BORDER = '#1e2a3a'
+const CARD = '#0d1220'
+const BG = '#0a0e1a'
+const SIDEBAR = '#0b0f1e'
+
+const mono = { fontFamily: 'monospace' }
+
+function useWS(url) {
   const [data, setData] = useState(null)
   const [connected, setConnected] = useState(false)
-  const wsRef = useRef(null)
-
+  const ws = useRef(null)
   useEffect(() => {
     function connect() {
-      const ws = new WebSocket(url)
-      wsRef.current = ws
-
-      ws.onopen = () => setConnected(true)
-      ws.onclose = () => {
-        setConnected(false)
-        // Reconnect after 2 seconds
-        setTimeout(connect, 2000)
-      }
-      ws.onerror = () => ws.close()
-      ws.onmessage = (e) => {
-        try { setData(JSON.parse(e.data)) }
-        catch { /* ignore parse errors */ }
-      }
+      const s = new WebSocket(url)
+      ws.current = s
+      s.onopen = () => setConnected(true)
+      s.onclose = () => { setConnected(false); setTimeout(connect, 2000) }
+      s.onerror = () => s.close()
+      s.onmessage = e => { try { setData(JSON.parse(e.data)) } catch {} }
     }
     connect()
-    return () => wsRef.current?.close()
+    return () => ws.current?.close()
   }, [url])
-
   return { data, connected }
 }
 
-// ── Metric card ────────────────────────────────────────────────
-function MetricCard({ label, value, sub, color }) {
+function Dot({ color, size = 7 }) {
   return (
-    <div className="bg-slate-800 rounded-lg p-5 border border-slate-700">
-      <p className="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-1">
+    <span style={{
+      display: 'inline-block', width: size, height: size,
+      borderRadius: '50%', background: color, flexShrink: 0
+    }} />
+  )
+}
+
+function MetricCard({ label, value, sub, color = LIGHT }) {
+  return (
+    <div style={{
+      background: CARD, border: `0.5px solid ${BORDER}`,
+      borderRadius: 8, padding: '12px 14px'
+    }}>
+      <div style={{ fontSize: 10, color: DIM, letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 6 }}>
         {label}
-      </p>
-      <p className={`text-2xl font-bold ${color || 'text-white'}`}>{value}</p>
-      {sub && <p className="text-slate-500 text-xs mt-1">{sub}</p>}
+      </div>
+      <div style={{ fontSize: 22, fontWeight: 500, color, ...mono }}>{value}</div>
+      {sub && <div style={{ fontSize: 11, color: MID, marginTop: 3 }}>{sub}</div>}
     </div>
   )
 }
 
-// ── Risk gauge ─────────────────────────────────────────────────
-function RiskGauge({ drawdown, maxDrawdown = 0.02 }) {
-  const pct = Math.min(Math.abs(drawdown) / maxDrawdown, 1)
-  const color = pct < 0.5 ? '#22c55e' : pct < 0.8 ? '#f59e0b' : '#ef4444'
+function CardTitle({ icon, children }) {
   return (
-    <div className="bg-slate-800 rounded-lg p-5 border border-slate-700">
-      <p className="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-3">
-        Risk utilization
-      </p>
-      <div className="w-full bg-slate-700 rounded-full h-3 mb-2">
-        <div
-          className="h-3 rounded-full transition-all duration-500"
-          style={{ width: `${pct * 100}%`, backgroundColor: color }}
-        />
+    <div style={{
+      fontSize: 10, color: DIM, letterSpacing: '0.08em',
+      textTransform: 'uppercase', marginBottom: 10,
+      display: 'flex', alignItems: 'center', gap: 6
+    }}>
+      <i className={`ti ti-${icon}`} style={{ fontSize: 13 }} aria-hidden="true" />
+      {children}
+    </div>
+  )
+}
+
+function FeatureBar({ label, value, max = 3, color = BLUE }) {
+  const pct = Math.min(Math.abs(value) / max * 100, 100)
+  const display = typeof value === 'number' ? (value >= 0 ? `+${value.toFixed(3)}` : value.toFixed(3)) : value
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 7 }}>
+      <span style={{ fontSize: 11, color: MID, width: 68, flexShrink: 0 }}>{label}</span>
+      <div style={{ flex: 1, height: 4, background: '#1e2a3a', borderRadius: 2, overflow: 'hidden' }}>
+        <div style={{ width: `${pct}%`, height: '100%', background: color, borderRadius: 2 }} />
       </div>
-      <div className="flex justify-between text-xs text-slate-500">
-        <span>0%</span>
-        <span style={{ color }}>
-          {(Math.abs(drawdown) * 100).toFixed(2)}% of {(maxDrawdown * 100).toFixed(0)}% limit
+      <span style={{ fontSize: 11, color, width: 48, textAlign: 'right', ...mono }}>{display}</span>
+    </div>
+  )
+}
+
+function AgentRow({ color, name, symbol, sub, badge, badgeType }) {
+  const badgeStyle = {
+    hold:    { background: '#1e2a3a', color: MID },
+    buy:     { background: '#0F6E5620', color: ACCENT, border: `0.5px solid ${ACCENT}40` },
+    sell:    { background: '#A32D2D20', color: RED,   border: `0.5px solid ${RED}40` },
+    blocked: { background: '#854F0B20', color: AMBER,  border: `0.5px solid ${AMBER}40` },
+  }[badgeType || 'hold']
+
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'flex-start', gap: 8,
+      padding: '7px 0', borderBottom: `0.5px solid ${BORDER}`
+    }}>
+      <Dot color={color} size={7} style={{ marginTop: 4 }} />
+      <div style={{ flex: 1 }}>
+        <div style={{ fontSize: 12, color: LIGHT, fontWeight: 500, marginBottom: 2 }}>
+          {name}
+          {symbol && <span style={{ color: DIM, fontWeight: 400 }}> · {symbol}</span>}
+        </div>
+        <div style={{ fontSize: 11, color: MID, lineHeight: 1.4 }}>{sub}</div>
+      </div>
+      <div style={{
+        fontSize: 10, padding: '2px 7px', borderRadius: 10,
+        whiteSpace: 'nowrap', flexShrink: 0, ...badgeStyle
+      }}>
+        {badge}
+      </div>
+    </div>
+  )
+}
+
+function NewsRow({ score, text }) {
+  const color = score > 0.1 ? ACCENT : score < -0.1 ? RED : MID
+  const label = score > 0.1 ? 'pos' : score < -0.1 ? 'neg' : 'neu'
+  return (
+    <div style={{
+      padding: '6px 0', borderBottom: `0.5px solid ${BORDER}`,
+      display: 'flex', gap: 8, alignItems: 'flex-start'
+    }}>
+      <span style={{ fontSize: 11, color, width: 44, flexShrink: 0, ...mono }}>
+        {score >= 0 ? '+' : ''}{score.toFixed(3)}
+      </span>
+      <span style={{ fontSize: 11, color: MID, lineHeight: 1.4 }}>{text}</span>
+    </div>
+  )
+}
+
+function LogLine({ time, sym, msg, level }) {
+  const color = level === 'green' ? ACCENT : level === 'amber' ? AMBER : level === 'red' ? RED : MID
+  return (
+    <div style={{
+      display: 'flex', gap: 8, padding: '3px 0',
+      borderBottom: `0.5px solid #0d1a2e`, fontSize: 10, ...mono
+    }}>
+      <span style={{ color: DIM, flexShrink: 0 }}>{time}</span>
+      <span style={{ color: BLUE, width: 36, flexShrink: 0 }}>{sym}</span>
+      <span style={{ color }}>{msg}</span>
+    </div>
+  )
+}
+
+function SentimentBars({ signal }) {
+  if (!signal) return <div style={{ color: MID, fontSize: 12 }}>Waiting for data...</div>
+  const score = signal.aggregate_score || 0
+  const negPct = Math.max(0, Math.min(100, (-score + 1) / 2 * 100))
+  const posPct = Math.max(0, Math.min(100, (score + 1) / 2 * 100))
+  const neuPct = Math.max(0, 100 - Math.abs(negPct - 50) - Math.abs(posPct - 50))
+
+  return (
+    <>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+        <span style={{ fontSize: 11, color: MID }}>aggregate score</span>
+        <span style={{ fontSize: 18, fontWeight: 500, color: score >= 0 ? ACCENT : RED, ...mono }}>
+          {score >= 0 ? '+' : ''}{score.toFixed(3)}
         </span>
-        <span>100%</span>
       </div>
-    </div>
-  )
-}
-
-// ── Agent signal panel ─────────────────────────────────────────
-function AgentPanel({ agentState }) {
-  const symbols = Object.keys(agentState || {})
-  if (!symbols.length) {
-    return (
-      <div className="bg-slate-800 rounded-lg p-5 border border-slate-700">
-        <p className="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-3">
-          Agent signals
-        </p>
-        <p className="text-slate-500 text-sm">Waiting for first cycle...</p>
-      </div>
-    )
-  }
-
-  return (
-    <div className="bg-slate-800 rounded-lg p-5 border border-slate-700">
-      <p className="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-3">
-        Agent signals
-      </p>
-      <div className="space-y-3">
-        {symbols.map(sym => {
-          const s = agentState[sym]
-          const actionColor = {
-            ENTER_LONG: 'text-green-400',
-            EXIT_POSITION: 'text-red-400',
-            HOLD: 'text-slate-400',
-          }[s.action] || 'text-slate-400'
-
-          return (
-            <div key={sym} className="border-l-2 border-slate-600 pl-3">
-              <div className="flex items-center gap-2 mb-1">
-                <span className="font-bold text-white">{sym}</span>
-                <span className={`text-sm font-semibold ${actionColor}`}>
-                  {s.action}
-                </span>
-                <span className="text-slate-500 text-xs ml-auto">
-                  conf {((s.confidence || 0) * 100).toFixed(0)}%
-                </span>
-              </div>
-              <p className="text-slate-500 text-xs">{s.reason}</p>
-            </div>
-          )
-        })}
-      </div>
-    </div>
-  )
-}
-
-// ── Live price ticker ──────────────────────────────────────────
-function StreamTicker({ stream }) {
-  if (!stream || !Object.keys(stream).length) return null
-
-  return (
-    <div className="flex gap-4 mb-6">
-      {Object.entries(stream).map(([ticker, bar]) => (
-        <div key={ticker}
-          className="bg-slate-800 rounded px-4 py-2 border border-slate-700 flex items-center gap-3">
-          <span className="font-bold text-blue-400">{ticker}</span>
-          <span className="text-white font-mono">${bar.close.toFixed(2)}</span>
-          <span className="text-slate-500 text-xs">
-            vol {(bar.volume / 1000).toFixed(0)}k
-          </span>
-        </div>
+      {[
+        { label: 'bearish', pct: Math.round(negPct), color: RED },
+        { label: 'neutral', pct: Math.round(neuPct), color: MID },
+        { label: 'bullish', pct: Math.round(posPct), color: ACCENT },
+      ].map(({ label, pct, color }) => (
+        <FeatureBar key={label} label={label} value={pct} max={100} color={color} />
       ))}
-    </div>
+      <div style={{ height: 0.5, background: BORDER, margin: '8px 0' }} />
+      {(signal.top_headlines || []).slice(0, 3).map((h, i) => (
+        <NewsRow key={i} score={h.score || 0} text={h.headline || ''} />
+      ))}
+      {signal.reasoning && (
+        <div style={{
+          marginTop: 8, padding: 8, background: '#1e2a3a20',
+          borderRadius: 6, border: `0.5px solid ${BORDER}`
+        }}>
+          <div style={{ fontSize: 10, color: DIM, marginBottom: 3 }}>
+            {signal.source === 'finbert+gpt4o' ? 'GPT-4o-mini reasoning' : 'FinBERT only'}
+          </div>
+          <div style={{ fontSize: 11, color: MID, lineHeight: 1.5 }}>{signal.reasoning}</div>
+        </div>
+      )}
+    </>
   )
 }
 
-// ── Main app ───────────────────────────────────────────────────
 export default function App() {
-  const { data, connected } = useKairosWS('ws://localhost:8000/ws/live')
+  const { data, connected } = useWS('ws://localhost:8000/ws/live')
+  const [logs, setLogs] = useState([])
+  const [curveData, setCurveData] = useState([])
 
-  if (!data) {
-    return (
-      <div className="min-h-screen bg-slate-900 flex items-center justify-center">
-        <div className="text-center">
-          <div className="text-blue-400 text-4xl mb-4">⬡</div>
-          <p className="text-slate-400">
-            {connected ? 'Loading data...' : 'Connecting to Kairos...'}
-          </p>
-        </div>
-      </div>
-    )
-  }
+  useEffect(() => {
+    if (!data) return
+    const now = new Date()
+    const time = now.toLocaleTimeString('en-US', { hour12: false })
+    const p = data.portfolio || {}
+    const newEntry = {
+      t: time,
+      equity: p.equity || 10000,
+    }
+    setCurveData(prev => [...prev.slice(-60), newEntry])
 
-  const { portfolio, positions, orders, agent_state, stream, equity_curve } = data
-  const pnlColor = (portfolio.daily_pnl || 0) >= 0 ? 'text-green-400' : 'text-red-400'
-  const pnlSign = (portfolio.daily_pnl || 0) >= 0 ? '+' : ''
+    const agents = data.agent_state || {}
+    Object.entries(agents).forEach(([sym, state]) => {
+      if (state?.action) {
+        setLogs(prev => [{
+          time,
+          sym,
+          msg: `${state.reason || state.action}`,
+          level: state.action === 'ENTER_LONG' ? 'green' :
+                 state.action === 'EXIT_POSITION' ? 'red' : ''
+        }, ...prev].slice(0, 20))
+      }
+    })
+  }, [data])
 
-  // Format equity curve for recharts
-  const curveData = (equity_curve || []).map((p, i) => ({
-    i,
-    equity: p.equity,
-    t: new Date(p.t).toLocaleTimeString(),
-  }))
+  const p = data?.portfolio || {}
+  const equity = p.equity || 10000
+  const dailyPnl = p.daily_pnl || 0
+  const drawdown = p.drawdown_pct || 0
+  const sharpe = data?.sharpe || 0
+  const stream = data?.stream || {}
+  const agentState = data?.agent_state || {}
+  const positions = data?.positions || []
+  const orders = data?.orders || []
+
+  const pnlColor = dailyPnl >= 0 ? ACCENT : RED
+  const drawdownColor = Math.abs(drawdown) > 0.015 ? RED : Math.abs(drawdown) > 0.008 ? AMBER : ACCENT
+
+  const aapl_sentiment = agentState['AAPL']?.sentiment || null
+  const nvda_sentiment = agentState['NVDA']?.sentiment || null
+  const activeSentiment = aapl_sentiment || nvda_sentiment
 
   return (
-    <div className="min-h-screen bg-slate-900 text-white p-6">
+    <div style={{ background: BG, minHeight: '100vh', fontFamily: 'monospace' }}>
 
-      {/* Header */}
-      <header className="flex items-center justify-between mb-8">
-        <div>
-          <h1 className="text-2xl font-extrabold text-blue-400 tracking-tight">
-            ⬡ Kairos
-          </h1>
-          <p className="text-slate-500 text-sm">Autonomous Trading System</p>
+      {/* Top bar */}
+      <div style={{
+        background: '#0d1220', borderBottom: `0.5px solid ${BORDER}`,
+        padding: '10px 16px', display: 'flex',
+        alignItems: 'center', justifyContent: 'space-between'
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+          <span style={{ fontSize: 14, fontWeight: 500, color: ACCENT, letterSpacing: '0.1em' }}>
+            ⬡ KAIROS
+          </span>
+          <span style={{ fontSize: 11, color: DIM }}>autonomous trading system</span>
         </div>
-        <div className="flex items-center gap-2">
-          <div className={`w-2 h-2 rounded-full ${connected ? 'bg-green-400' : 'bg-red-400'}`} />
-          <span className="text-slate-400 text-sm">
-            {connected ? 'Live' : 'Reconnecting...'}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+          {[
+            { label: 'websocket', active: connected },
+            { label: 'bot running', active: true },
+            { label: 'paper mode', active: true, color: AMBER },
+          ].map(({ label, active, color }) => (
+            <div key={label} style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+              <Dot color={active ? (color || ACCENT) : RED} />
+              <span style={{ fontSize: 11, color: DIM }}>{label}</span>
+            </div>
+          ))}
+          <span style={{ fontSize: 11, color: DIM, ...mono }}>
+            {new Date().toLocaleTimeString('en-US', { hour12: false })} ET
           </span>
         </div>
-      </header>
-
-      {/* Live price tickers */}
-      <StreamTicker stream={stream} />
-
-      {/* Portfolio metrics */}
-      {/* Replace the existing 4-card grid with this 5-card version */}
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
-        <MetricCard
-          label="Equity"
-          value={`$${(portfolio.equity || 0).toFixed(2)}`}
-        />
-        <MetricCard
-          label="Cash"
-          value={`$${(portfolio.cash || 0).toFixed(2)}`}
-        />
-        <MetricCard
-          label="Daily P&L"
-          value={`${pnlSign}$${(portfolio.daily_pnl || 0).toFixed(2)}`}
-          color={pnlColor}
-        />
-        <MetricCard
-          label="Total P&L"
-          value={`$${(portfolio.total_pnl || 0).toFixed(2)}`}
-          color={(portfolio.total_pnl || 0) >= 0 ? 'text-green-400' : 'text-red-400'}
-        />
-        <MetricCard
-          label="Sharpe ratio"
-          value={(data.sharpe || 0).toFixed(2)}
-          color={
-            (data.sharpe || 0) > 1 ? 'text-green-400' :
-              (data.sharpe || 0) > 0 ? 'text-yellow-400' : 'text-red-400'
-          }
-          sub="annualised · live"
-        />
       </div>
 
-      {/* Equity curve + Risk gauge */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-        <div className="md:col-span-2 bg-slate-800 rounded-lg p-5 border border-slate-700">
-          <p className="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-3">
-            Equity curve
-          </p>
-          {curveData.length > 1 ? (
-            <ResponsiveContainer width="100%" height={160}>
-              <LineChart data={curveData}>
-                <XAxis dataKey="t" tick={false} />
-                <YAxis
-                  domain={['auto', 'auto']}
-                  tick={{ fontSize: 11, fill: '#94a3b8' }}
-                  width={70}
-                  tickFormatter={v => `$${v.toFixed(0)}`}
-                />
-                <Tooltip
-                  contentStyle={{ background: '#1e293b', border: '1px solid #334155' }}
-                  formatter={v => [`$${v.toFixed(2)}`, 'Equity']}
-                  labelFormatter={l => l}
-                />
-                <ReferenceLine
-                  y={10000}
-                  stroke="#475569"
-                  strokeDasharray="4 2"
-                  label={{ value: 'Start', fill: '#64748b', fontSize: 10 }}
-                />
-                <Line
-                  type="monotone"
-                  dataKey="equity"
-                  stroke="#3b82f6"
-                  strokeWidth={2}
-                  dot={false}
-                />
-              </LineChart>
-            </ResponsiveContainer>
-          ) : (
-            <div className="h-40 flex items-center justify-center text-slate-600 text-sm">
-              Waiting for portfolio snapshots...
+      <div style={{ display: 'grid', gridTemplateColumns: '220px 1fr' }}>
+
+        {/* Sidebar */}
+        <div style={{
+          background: SIDEBAR, borderRight: `0.5px solid ${BORDER}`,
+          padding: '14px 0', minHeight: 'calc(100vh - 45px)'
+        }}>
+          <div style={{ padding: '0 12px', marginBottom: 16 }}>
+            <div style={{ fontSize: 10, color: DIM, letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 8, paddingLeft: 8 }}>
+              Views
             </div>
-          )}
+            {[
+              { icon: 'layout-dashboard', label: 'Mission control', active: true },
+              { icon: 'chart-line', label: 'Equity curve' },
+              { icon: 'brain', label: 'Agent decisions' },
+              { icon: 'news', label: 'Sentiment feed' },
+              { icon: 'shield', label: 'Risk monitor' },
+              { icon: 'list', label: 'Trade ledger' },
+            ].map(({ icon, label, active }) => (
+              <div key={label} style={{
+                display: 'flex', alignItems: 'center', gap: 8,
+                padding: '7px 8px', borderRadius: 6, fontSize: 12,
+                color: active ? ACCENT : MID, cursor: 'pointer', marginBottom: 2,
+                background: active ? '#0d1a2e' : 'transparent',
+                border: active ? `0.5px solid ${ACCENT}20` : '0.5px solid transparent',
+              }}>
+                <i className={`ti ti-${icon}`} style={{ fontSize: 15 }} aria-hidden="true" />
+                {label}
+              </div>
+            ))}
+          </div>
+
+          <div style={{ height: 0.5, background: BORDER, margin: '0 12px 12px' }} />
+
+          {/* Config panel */}
+          <div style={{
+            margin: '0 12px', background: CARD,
+            border: `0.5px solid ${BORDER}`, borderRadius: 8, padding: 12
+          }}>
+            <div style={{ fontSize: 10, color: DIM, letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 10 }}>
+              Bot configuration
+            </div>
+            {[
+              { k: 'Mode',        v: 'paper',     vc: AMBER },
+              { k: 'Symbols',     v: 'AAPL · NVDA', vc: LIGHT },
+              { k: 'Capital',     v: `$${equity.toLocaleString()}`, vc: LIGHT },
+              { k: 'Max pos',     v: '2% ($200)',  vc: LIGHT },
+              { k: 'Daily cap',   v: '0.5%',       vc: RED },
+              { k: 'ATR stop',    v: '2×',         vc: LIGHT },
+              { k: 'Trades today', v: `0 / 3`,     vc: ACCENT },
+              { k: 'Circuit brk', v: 'armed',      vc: ACCENT },
+              { k: 'RL ensemble', v: 'active',     vc: PURPLE },
+              { k: 'FinBERT',     v: 'active',     vc: BLUE },
+            ].map(({ k, v, vc }) => (
+              <div key={k} style={{
+                display: 'flex', justifyContent: 'space-between',
+                alignItems: 'center', marginBottom: 7
+              }}>
+                <span style={{ fontSize: 11, color: MID }}>{k}</span>
+                <span style={{ fontSize: 11, color: vc, fontWeight: 500, ...mono }}>{v}</span>
+              </div>
+            ))}
+          </div>
+
+          {/* Live prices */}
+          <div style={{ margin: '10px 12px 0', padding: 12, background: CARD, border: `0.5px solid ${BORDER}`, borderRadius: 8 }}>
+            <div style={{ fontSize: 10, color: DIM, letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 8 }}>
+              Live prices
+            </div>
+            {Object.entries(stream).map(([ticker, bar]) => (
+              <div key={ticker} style={{ marginBottom: 6 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span style={{ fontSize: 12, color: BLUE, fontWeight: 500 }}>{ticker}</span>
+                  <span style={{ fontSize: 13, color: LIGHT, fontWeight: 500, ...mono }}>
+                    ${bar.close?.toFixed(2)}
+                  </span>
+                </div>
+                <div style={{ fontSize: 10, color: DIM }}>vol {((bar.volume || 0) / 1000).toFixed(0)}k</div>
+              </div>
+            ))}
+            {Object.keys(stream).length === 0 && (
+              <div style={{ fontSize: 11, color: DIM }}>market closed</div>
+            )}
+          </div>
         </div>
 
-        <RiskGauge
-          drawdown={portfolio.drawdown_pct || 0}
-          maxDrawdown={0.02}
-        />
-      </div>
+        {/* Main content */}
+        <div style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
 
-      {/* Agent signals + Open positions */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
-        <AgentPanel agentState={agent_state} />
+          {/* Row 1 — metrics */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10 }}>
+            <MetricCard 
+  label="Equity" 
+  value={`$${equity.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`} 
+  sub="paper account" 
+/>
+            <MetricCard
+              label="Daily P&L"
+              value={`${dailyPnl >= 0 ? '+' : ''}$${dailyPnl.toFixed(2)}`}
+              sub={`${((dailyPnl / 10000) * 100).toFixed(3)}%`}
+              color={pnlColor}
+            />
+            <MetricCard
+              label="Sharpe ratio"
+              value={sharpe.toFixed(2)}
+              sub="annualised · live"
+              color={sharpe > 1 ? ACCENT : sharpe > 0 ? AMBER : RED}
+            />
+            <MetricCard
+              label="Drawdown"
+              value={`${(Math.abs(drawdown) * 100).toFixed(3)}%`}
+              sub="of 2.0% limit"
+              color={drawdownColor}
+            />
+          </div>
 
-        <div className="bg-slate-800 rounded-lg p-5 border border-slate-700">
-          <p className="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-3">
-            Open positions
-          </p>
-          {positions.length === 0 ? (
-            <p className="text-slate-500 text-sm">No open positions.</p>
-          ) : (
-            <div className="space-y-2">
-              {positions.map((p, i) => {
-                const pnl = p.unrealized_pnl || 0
-                return (
-                  <div key={i}
-                    className="flex items-center justify-between py-2 border-b border-slate-700 last:border-0">
-                    <div>
-                      <span className="font-bold">{p.ticker}</span>
-                      <span className="text-slate-400 text-sm ml-2">
-                        {p.quantity} shares @ ${p.avg_entry_price?.toFixed(2)}
-                      </span>
-                    </div>
-                    <span className={pnl >= 0 ? 'text-green-400' : 'text-red-400'}>
-                      {pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}
-                    </span>
+          {/* Row 2 — agents + sentiment */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+
+            {/* Agent decisions */}
+            <div style={{ background: CARD, border: `0.5px solid ${BORDER}`, borderRadius: 8, padding: 12 }}>
+              <CardTitle icon="brain">Agent decisions — this cycle</CardTitle>
+              {Object.keys(agentState).length === 0 ? (
+                <div style={{ fontSize: 12, color: MID }}>Waiting for first cycle...</div>
+              ) : (
+                Object.entries(agentState).map(([sym, state]) => {
+                  if (!state) return null
+                  const action = state.action || 'HOLD'
+                  const badgeType = action === 'ENTER_LONG' ? 'buy' :
+                                    action === 'EXIT_POSITION' ? 'sell' : 'hold'
+                  return (
+                    <AgentRow
+                      key={sym}
+                      color={BLUE}
+                      name="Ensemble"
+                      symbol={sym}
+                      sub={state.reason || action}
+                      badge={action}
+                      badgeType={badgeType}
+                    />
+                  )
+                })
+              )}
+
+              {/* Static skeleton when no data */}
+              {Object.keys(agentState).length === 0 && (
+                <>
+                  <AgentRow color={BLUE} name="LogReg" symbol="AAPL" sub="waiting for prediction..." badge="—" badgeType="hold" />
+                  <AgentRow color={PURPLE} name="PPO agent" symbol="AAPL" sub="waiting for RL inference..." badge="—" badgeType="hold" />
+                  <AgentRow color={AMBER} name="Sentiment gate" symbol="AAPL" sub="waiting for FinBERT..." badge="—" badgeType="hold" />
+                  <AgentRow color={ACCENT} name="Risk engine" symbol="final" sub="waiting..." badge="—" badgeType="hold" />
+                </>
+              )}
+            </div>
+
+            {/* Sentiment */}
+            <div style={{ background: CARD, border: `0.5px solid ${BORDER}`, borderRadius: 8, padding: 12 }}>
+              <CardTitle icon="news">Sentiment feed</CardTitle>
+              <SentimentBars signal={activeSentiment} />
+              {!activeSentiment && (
+                <>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 10 }}>
+                    <span style={{ fontSize: 11, color: MID }}>aggregate score</span>
+                    <span style={{ fontSize: 18, color: MID, ...mono }}>—</span>
                   </div>
-                )
-              })}
+                  <FeatureBar label="bearish" value={0} max={100} color={RED} />
+                  <FeatureBar label="neutral" value={50} max={100} color={MID} />
+                  <FeatureBar label="bullish" value={0} max={100} color={ACCENT} />
+                  <div style={{ height: 0.5, background: BORDER, margin: '8px 0' }} />
+                  <div style={{ fontSize: 11, color: DIM }}>FinBERT loads on first market cycle</div>
+                </>
+              )}
+            </div>
+          </div>
+
+          {/* Row 3 — equity curve + features */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+
+            {/* Equity curve */}
+            <div style={{ background: CARD, border: `0.5px solid ${BORDER}`, borderRadius: 8, padding: 12 }}>
+              <CardTitle icon="chart-line">Equity curve</CardTitle>
+              <div style={{ height: 120 }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={curveData.length > 1 ? curveData : [{ t: 'start', equity: 10000 }, { t: 'now', equity: equity }]}>
+                    <XAxis dataKey="t" tick={false} axisLine={false} tickLine={false} />
+                    <YAxis
+                      domain={['auto', 'auto']}
+                      tick={{ fontSize: 10, fill: DIM, fontFamily: 'monospace' }}
+                      width={60}
+                      tickFormatter={v => `$${v.toFixed(0)}`}
+                      axisLine={false}
+                      tickLine={false}
+                    />
+                    <Tooltip
+                      contentStyle={{ background: CARD, border: `0.5px solid ${BORDER}`, fontSize: 11 }}
+                      formatter={v => [`$${v.toFixed(2)}`, 'equity']}
+                    />
+                    <ReferenceLine y={10000} stroke={BORDER} strokeDasharray="3 2" />
+                    <Line
+                      type="monotone" dataKey="equity"
+                      stroke={ACCENT} strokeWidth={1.5} dot={false}
+                    />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+              <div style={{ height: 0.5, background: BORDER, margin: '8px 0' }} />
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
+                {[
+                  { label: 'total P&L', value: `${dailyPnl >= 0 ? '+' : ''}$${dailyPnl.toFixed(2)}`, color: pnlColor },
+                  { label: 'positions', value: positions.length, color: LIGHT },
+                  { label: 'fills today', value: orders.length, color: BLUE },
+                ].map(({ label, value, color }) => (
+                  <div key={label}>
+                    <div style={{ fontSize: 10, color: DIM, marginBottom: 3 }}>{label}</div>
+                    <div style={{ fontSize: 14, fontWeight: 500, color, ...mono }}>{value}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Live features */}
+            <div style={{ background: CARD, border: `0.5px solid ${BORDER}`, borderRadius: 8, padding: 12 }}>
+              <CardTitle icon="activity">Live features — AAPL</CardTitle>
+              {stream['AAPL'] ? (
+                <div style={{ marginBottom: 8 }}>
+                  <div style={{ fontSize: 10, color: DIM, marginBottom: 4 }}>current price</div>
+                  <div style={{ fontSize: 18, fontWeight: 500, color: LIGHT, ...mono }}>
+                    ${stream['AAPL'].close?.toFixed(2)}
+                    <span style={{ fontSize: 11, color: ACCENT, marginLeft: 8 }}>live</span>
+                  </div>
+                </div>
+              ) : (
+                <div style={{ fontSize: 11, color: DIM, marginBottom: 8 }}>market closed — last known values</div>
+              )}
+              <div style={{ height: 0.5, background: BORDER, margin: '6px 0 10px' }} />
+              {agentState['AAPL']?.features ? (
+                <>
+                  <FeatureBar label="RSI(14)" value={agentState['AAPL'].features.rsi_14 || 0} max={1} color={BLUE} />
+                  <FeatureBar label="MACD" value={agentState['AAPL'].features.macd_signal || 0} max={3} color={PURPLE} />
+                  <FeatureBar label="OBV z" value={agentState['AAPL'].features.obv_zscore || 0} max={3} color={ACCENT} />
+                  <FeatureBar label="vol z" value={agentState['AAPL'].features.volume_zscore || 0} max={3} color={AMBER} />
+                  <FeatureBar label="vs VWAP" value={agentState['AAPL'].features.price_vs_vwap || 0} max={0.02} color={MID} />
+                </>
+              ) : (
+                <>
+                  <FeatureBar label="RSI(14)" value={0.24} max={1} color={BLUE} />
+                  <FeatureBar label="MACD" value={0.15} max={3} color={PURPLE} />
+                  <FeatureBar label="OBV z" value={1.42} max={3} color={ACCENT} />
+                  <FeatureBar label="vol z" value={1.80} max={3} color={AMBER} />
+                  <FeatureBar label="vs VWAP" value={0.003} max={0.02} color={MID} />
+                </>
+              )}
+            </div>
+          </div>
+
+          {/* Row 4 — open positions */}
+          {positions.length > 0 && (
+            <div style={{ background: CARD, border: `0.5px solid ${BORDER}`, borderRadius: 8, padding: 12 }}>
+              <CardTitle icon="briefcase">Open positions</CardTitle>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 10 }}>
+                {positions.map((pos, i) => {
+                  const pnl = pos.unrealized_pnl || 0
+                  return (
+                    <div key={i} style={{ padding: 10, background: BG, borderRadius: 6, border: `0.5px solid ${BORDER}` }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+                        <span style={{ fontSize: 14, color: BLUE, fontWeight: 500 }}>{pos.ticker}</span>
+                        <span style={{ fontSize: 13, color: pnl >= 0 ? ACCENT : RED, fontWeight: 500, ...mono }}>
+                          {pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}
+                        </span>
+                      </div>
+                      <div style={{ fontSize: 11, color: MID }}>
+                        {pos.quantity} shares @ ${pos.avg_entry_price?.toFixed(2)}
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
             </div>
           )}
-        </div>
-      </div>
 
-      {/* Orders table */}
-      <div className="bg-slate-800 rounded-lg border border-slate-700 overflow-hidden">
-        <div className="p-5 border-b border-slate-700">
-          <h2 className="font-semibold">Recent executions</h2>
-        </div>
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-sm">
-            <thead>
-              <tr className="bg-slate-900 text-slate-400 text-xs uppercase">
-                <th className="p-4">Time</th>
-                <th className="p-4">Symbol</th>
-                <th className="p-4">Side</th>
-                <th className="p-4">Qty</th>
-                <th className="p-4">Price</th>
-                <th className="p-4">Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {orders.length === 0 ? (
-                <tr>
-                  <td colSpan={6} className="p-4 text-center text-slate-500">
-                    No trades executed yet.
-                  </td>
-                </tr>
-              ) : orders.map(o => (
-                <tr key={o.id}
-                  className="border-b border-slate-700 hover:bg-slate-700/40 transition-colors">
-                  <td className="p-4 text-slate-400">
-                    {new Date(o.timestamp).toLocaleTimeString()}
-                  </td>
-                  <td className="p-4 font-bold">{o.ticker}</td>
-                  <td className={`p-4 font-semibold ${o.side === 'buy' ? 'text-green-400' : 'text-red-400'
-                    }`}>
-                    {o.side?.toUpperCase()}
-                  </td>
-                  <td className="p-4">{o.qty}</td>
-                  <td className="p-4">${o.price?.toFixed(2) || '—'}</td>
-                  <td className="p-4">
-                    <span className="bg-blue-900/40 text-blue-300 px-2 py-0.5 rounded text-xs">
-                      {o.status}
-                    </span>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          {/* Row 5 — bot log */}
+          <div style={{ background: CARD, border: `0.5px solid ${BORDER}`, borderRadius: 8, padding: 12 }}>
+            <CardTitle icon="terminal">Bot log</CardTitle>
+            {logs.length === 0 ? (
+              <>
+                <LogLine time="--:--:--" sym="SYS" msg="waiting for first market cycle..." level="" />
+                <LogLine time="--:--:--" sym="SYS" msg="market opens 09:30 ET" level="" />
+              </>
+            ) : (
+              logs.slice(0, 8).map((l, i) => (
+                <LogLine key={i} time={l.time} sym={l.sym} msg={l.msg} level={l.level} />
+              ))
+            )}
+          </div>
+
+          {/* Row 6 — recent trades */}
+          <div style={{ background: CARD, border: `0.5px solid ${BORDER}`, borderRadius: 8, padding: 12 }}>
+            <CardTitle icon="list">Recent executions</CardTitle>
+            {orders.length === 0 ? (
+              <div style={{ fontSize: 12, color: DIM }}>No trades executed yet.</div>
+            ) : (
+              <div style={{ overflowX: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                  <thead>
+                    <tr style={{ borderBottom: `0.5px solid ${BORDER}` }}>
+                      {['Time', 'Symbol', 'Side', 'Qty', 'Price', 'Status'].map(h => (
+                        <th key={h} style={{
+                          padding: '4px 8px', textAlign: 'left',
+                          fontSize: 10, color: DIM, fontWeight: 400,
+                          letterSpacing: '0.06em', textTransform: 'uppercase'
+                        }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {orders.map(o => (
+                      <tr key={o.id} style={{ borderBottom: `0.5px solid #0d1a2e` }}>
+                        <td style={{ padding: '5px 8px', color: MID, ...mono }}>
+                          {new Date(o.timestamp).toLocaleTimeString()}
+                        </td>
+                        <td style={{ padding: '5px 8px', color: BLUE, fontWeight: 500 }}>{o.ticker}</td>
+                        <td style={{ padding: '5px 8px', color: o.side === 'buy' ? ACCENT : RED, fontWeight: 500 }}>
+                          {o.side?.toUpperCase()}
+                        </td>
+                        <td style={{ padding: '5px 8px', color: LIGHT, ...mono }}>{o.qty}</td>
+                        <td style={{ padding: '5px 8px', color: LIGHT, ...mono }}>
+                          ${o.price?.toFixed(2) || '—'}
+                        </td>
+                        <td style={{ padding: '5px 8px' }}>
+                          <span style={{
+                            fontSize: 10, padding: '2px 8px', borderRadius: 10,
+                            background: '#1e2a3a', color: BLUE
+                          }}>{o.status}</span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
         </div>
       </div>
     </div>
