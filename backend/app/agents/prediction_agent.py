@@ -40,16 +40,19 @@ class PredictionAgent:
         return result.scalar_one_or_none()
 
     def build_feature_dict(self, snapshot: FeatureSnapshot) -> dict:
-        return {
-            "return_1m": snapshot.return_1m,
-            "return_5m": snapshot.return_5m,
-            "volatility_10m": snapshot.volatility_10m,
-            "volume_zscore": snapshot.volume_zscore,
-            "price_vs_vwap": snapshot.price_vs_vwap,
-        }
+     return {
+        "return_1m":      snapshot.return_1m,
+        "return_5m":      snapshot.return_5m,
+        "volatility_10m": snapshot.volatility_10m,
+        "volume_zscore":  snapshot.volume_zscore,
+        "price_vs_vwap":  snapshot.price_vs_vwap,
+        "rsi_14":         snapshot.rsi_14,
+        "macd_signal":    snapshot.macd_signal,
+        "obv_zscore":     snapshot.obv_zscore,
+    }
 
     def has_missing_features(self, features: dict) -> bool:
-        return any(features[column] is None for column in FEATURE_COLUMNS)
+     return any(features.get(col) is None for col in FEATURE_COLUMNS)
 
     async def store_prediction(
         self,

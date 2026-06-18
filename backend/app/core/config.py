@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     trading_mode: str = "paper"
     risk_profile: str = "LEVEL_0_CONSERVATIVE"
 
-    starting_capital: float = 10_000
+    starting_capital: float = 100_000.0
     max_position_pct: float = 0.02
     max_daily_loss_pct: float = 0.005
     max_total_drawdown_pct: float = 0.02
