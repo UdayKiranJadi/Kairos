@@ -12,6 +12,12 @@ AGENT STACK (in order of execution each cycle):
   8. RLAgent          — PPO policy signal
   9. DecisionAgent    — ensemble + sentiment gate + risk check
   10. ExecutionAgent  — size + submit order via PaperBroker
+
+PARALLEL PROCESSING (Day 7 upgrade):
+  Symbols now run concurrently via asyncio.gather().
+  Sequential: 2 symbols × 3s = 6s per cycle.
+  Parallel:  20 symbols × 3s = 3s per cycle (bottleneck = slowest symbol).
+  One symbol failing does not crash others (return_exceptions=True).
 """
 
 import asyncio
@@ -44,8 +50,6 @@ logging.basicConfig(
 logger = logging.getLogger("Kairos.Bot")
 
 # ── Module-level singletons ───────────────────────────────────────
-# Loaded once at startup, reused every cycle.
-
 _sentiment_agent = SentimentAgent()
 
 _rl_agent = None
@@ -91,7 +95,7 @@ class AutonomousBot:
             tr = max(
                 bars[i].high - bars[i].low,
                 abs(bars[i].high - bars[i - 1].close),
-                abs(bars[i].low  - bars[i - 1].close),
+                abs(bars[i].low - bars[i - 1].close),
             )
             true_ranges.append(tr)
         return sum(true_ranges) / len(true_ranges) if true_ranges else 0.0
@@ -106,9 +110,9 @@ class AutonomousBot:
             return logreg_action, logreg_confidence, "LogReg only (no RL model)"
 
         try:
-            rl_result  = _rl_agent.predict(latest_features)
+            rl_result = _rl_agent.predict(latest_features)
             rl_bearish = rl_result["action"] == 1
-            rl_conf    = rl_result["confidence"]
+            rl_conf = rl_result["confidence"]
 
             if logreg_action == "EXIT_POSITION" and rl_bearish:
                 combined = (logreg_confidence + rl_conf) / 2
@@ -142,19 +146,19 @@ class AutonomousBot:
         latest_bar = await get_latest_bar(symbol)
         if latest_bar is None:
             logger.info(f"[{symbol}] No Redis bar — REST fallback")
-            end_time   = datetime.now(timezone.utc)
+            end_time = datetime.now(timezone.utc)
             start_time = end_time - timedelta(minutes=30)
             await bar_service.store_intraday_bars([symbol], start_time, end_time)
         else:
             logger.info(f"[{symbol}] Redis bar | close={latest_bar['close']:.2f}")
-            end_time   = datetime.now(timezone.utc)
+            end_time = datetime.now(timezone.utc)
             start_time = end_time - timedelta(minutes=2)
             await bar_service.store_intraday_bars([symbol], start_time, end_time)
 
         # ── 2. ATR stop-loss check ────────────────────────────────
         position = self.broker.get_open_position(symbol)
         if position:
-            entry_price   = float(position.avg_entry_price)
+            entry_price = float(position.avg_entry_price)
             current_price = float(position.current_price or 0)
             atr = await self._compute_atr(symbol, db)
 
@@ -183,53 +187,52 @@ class AutonomousBot:
                 return
 
         # ── 3. Build features ─────────────────────────────────────
-        end_time   = datetime.now(timezone.utc)
+        end_time = datetime.now(timezone.utc)
         start_time = end_time - timedelta(hours=1)
         feature_builder = FeatureBuilder(db)
         await feature_builder.store_features_for_symbol(
             symbol, start_time, end_time
         )
 
-        # ── 4. Get latest features for RL + sentiment context ─────
+        # ── 4. Get latest features ────────────────────────────────
         feature_list = await feature_builder.list_recent_features(
             symbol, limit=1
         )
 
         latest_features = {}
-        price_context   = {}
+        price_context = {}
+        current_price = None
 
         if feature_list:
             f = feature_list[0]
             latest_features = {
-                "return_1m":      f.return_1m      or 0.0,
-                "return_5m":      f.return_5m      or 0.0,
+                "return_1m":      f.return_1m or 0.0,
+                "return_5m":      f.return_5m or 0.0,
                 "volatility_10m": f.volatility_10m or 0.0,
-                "volume_zscore":  f.volume_zscore  or 0.0,
-                "price_vs_vwap":  f.price_vs_vwap  or 0.0,
-                "rsi_14":         f.rsi_14         or 0.0,
-                "macd_signal":    f.macd_signal     or 0.0,
-                "obv_zscore":     f.obv_zscore      or 0.0,
+                "volume_zscore":  f.volume_zscore or 0.0,
+                "price_vs_vwap":  f.price_vs_vwap or 0.0,
+                "rsi_14":         f.rsi_14 or 0.0,
+                "macd_signal":    f.macd_signal or 0.0,
+                "obv_zscore":     f.obv_zscore or 0.0,
             }
-            # Price context for GPT-4o reasoning
             recent_bars = await bar_service.list_recent_bars(symbol, limit=1)
             current_price = recent_bars[0].close if recent_bars else (
-                latest_bar["close"] if latest_bar else 0
+                latest_bar["close"] if latest_bar else None
             )
             price_context = {
-                "close":         current_price,
-                "rsi_14":        f.rsi_14         or 0.0,
-                "macd_signal":   f.macd_signal     or 0.0,
-                "price_vs_vwap": f.price_vs_vwap  or 0.0,
-                "volume_zscore": f.volume_zscore  or 0.0,
+                "close":         current_price or 0,
+                "rsi_14":        f.rsi_14 or 0.0,
+                "macd_signal":   f.macd_signal or 0.0,
+                "price_vs_vwap": f.price_vs_vwap or 0.0,
+                "volume_zscore": f.volume_zscore or 0.0,
             }
         else:
-            recent_bars   = await bar_service.list_recent_bars(symbol, limit=1)
+            recent_bars = await bar_service.list_recent_bars(symbol, limit=1)
             current_price = recent_bars[0].close if recent_bars else (
                 latest_bar["close"] if latest_bar else None
             )
 
-        # ── 5. Sentiment signal (FinBERT + GPT-4o) ───────────────
-        # Run in thread — FinBERT and OpenAI are synchronous/blocking
+        # ── 5. Sentiment signal ───────────────────────────────────
         try:
             sentiment_signal = await asyncio.to_thread(
                 _sentiment_agent.get_signal_sync,
@@ -255,7 +258,7 @@ class AutonomousBot:
             logger.warning(f"[{symbol}] Prediction skipped: {e}")
             return
 
-        # ── 7. DecisionAgent: LogReg + sentiment gate + risk ──────
+        # ── 7. DecisionAgent ──────────────────────────────────────
         decision_agent = DecisionAgent(db)
         eval_result = await decision_agent.evaluate_latest_prediction(
             ticker=symbol,
@@ -268,9 +271,9 @@ class AutonomousBot:
             sentiment_signal=sentiment_signal,
         )
 
-        trade_dict    = eval_result["trade_decision"]
+        trade_dict = eval_result["trade_decision"]
         logreg_action = trade_dict["action"]
-        logreg_conf   = trade_dict["confidence"]
+        logreg_conf = trade_dict["confidence"]
 
         # ── 8. RL ensemble ────────────────────────────────────────
         final_action, final_conf, ensemble_reason = self._apply_rl_ensemble(
@@ -287,7 +290,7 @@ class AutonomousBot:
         )
 
         risk_dict = eval_result["risk_decision"]
-        risk_obj  = RiskDecision(
+        risk_obj = RiskDecision(
             approved=risk_dict["approved"] and final_action != "HOLD",
             reason=risk_dict["reason"],
             max_position_value=risk_dict.get("max_position_value"),
@@ -367,10 +370,28 @@ class AutonomousBot:
                         f"trades_today={trades_today}"
                     )
 
-                    for symbol in self.symbols:
-                        await self.run_pipeline_for_symbol(
-                            session, symbol, live_state, trades_today
-                        )
+                    # ── Parallel symbol processing ─────────────────
+                    # WHY asyncio.gather:
+                    # Sequential: N symbols × 3s each = N×3s per cycle
+                    # Parallel:   N symbols × 3s each = 3s per cycle
+                    # return_exceptions=True means one symbol crashing
+                    # does not stop other symbols from processing.
+                    results = await asyncio.gather(
+                        *[
+                            self.run_pipeline_for_symbol(
+                                session, sym, live_state, trades_today
+                            )
+                            for sym in self.symbols
+                        ],
+                        return_exceptions=True,
+                    )
+
+                    # Log per-symbol errors without crashing the cycle
+                    for sym, result in zip(self.symbols, results):
+                        if isinstance(result, Exception):
+                            logger.error(
+                                f"[{sym}] Pipeline error: {result}"
+                            )
 
                 now = datetime.now()
                 sleep_secs = 60 - now.second
