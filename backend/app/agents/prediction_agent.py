@@ -36,23 +36,35 @@ class PredictionAgent:
             .order_by(FeatureSnapshot.timestamp.desc())
             .limit(1)
         )
-
         return result.scalar_one_or_none()
 
     def build_feature_dict(self, snapshot: FeatureSnapshot) -> dict:
-     return {
-        "return_1m":      snapshot.return_1m,
-        "return_5m":      snapshot.return_5m,
-        "volatility_10m": snapshot.volatility_10m,
-        "volume_zscore":  snapshot.volume_zscore,
-        "price_vs_vwap":  snapshot.price_vs_vwap,
-        "rsi_14":         snapshot.rsi_14,
-        "macd_signal":    snapshot.macd_signal,
-        "obv_zscore":     snapshot.obv_zscore,
-    }
+        """
+        Build feature dict from snapshot.
+        Must include all 8 features — 5 original + 3 new (RSI, MACD, OBV).
+        If new columns are None (old snapshot rows), default to 0.0
+        so prediction still runs rather than crashing.
+        """
+        return {
+            "return_1m":      snapshot.return_1m,
+            "return_5m":      snapshot.return_5m,
+            "volatility_10m": snapshot.volatility_10m,
+            "volume_zscore":  snapshot.volume_zscore,
+            "price_vs_vwap":  snapshot.price_vs_vwap,
+            "rsi_14":         snapshot.rsi_14 if snapshot.rsi_14 is not None else 0.0,
+            "macd_signal":    snapshot.macd_signal if snapshot.macd_signal is not None else 0.0,
+            "obv_zscore":     snapshot.obv_zscore if snapshot.obv_zscore is not None else 0.0,
+        }
 
     def has_missing_features(self, features: dict) -> bool:
-     return any(features.get(col) is None for col in FEATURE_COLUMNS)
+        """
+        Check if any of the original 5 critical features are missing.
+        We only block on the original 5 — RSI/MACD/OBV default to 0.0
+        so they never block prediction even on older snapshot rows.
+        """
+        critical = ["return_1m", "return_5m", "volatility_10m",
+                    "volume_zscore", "price_vs_vwap"]
+        return any(features.get(col) is None for col in critical)
 
     async def store_prediction(
         self,
@@ -62,15 +74,10 @@ class PredictionAgent:
     ) -> Prediction:
         probability_up = float(prediction_result["probability_up"])
         predicted_class = int(prediction_result["predicted_class"])
-
         confidence = max(probability_up, 1.0 - probability_up)
-
-        # Temporary directional score.
-        # Later we will replace this with a true expected-return model.
         predicted_return_proxy = probability_up - 0.5
 
         clean_timestamp = timestamp
-
         if clean_timestamp.tzinfo is not None:
             clean_timestamp = clean_timestamp.astimezone(timezone.utc).replace(tzinfo=None)
 
@@ -89,7 +96,6 @@ class PredictionAgent:
         self.db.add(prediction)
         await self.db.commit()
         await self.db.refresh(prediction)
-
         return prediction
 
     async def predict_latest(
@@ -100,12 +106,10 @@ class PredictionAgent:
         ticker = ticker.upper()
 
         symbol = await self.get_symbol(ticker)
-
         if symbol is None:
             raise ValueError(f"Symbol {ticker} does not exist. Load bars first.")
 
         snapshot = await self.get_latest_feature_snapshot(symbol.id)
-
         if snapshot is None:
             raise ValueError(
                 f"No feature snapshot found for {ticker}. Build features first."
@@ -128,13 +132,11 @@ class PredictionAgent:
         model = IntradayPredictionModel(model_path)
         prediction_result = model.predict_one(features)
 
-        prediction = await self.store_prediction(
+        return await self.store_prediction(
             symbol_id=symbol.id,
             timestamp=snapshot.timestamp,
             prediction_result=prediction_result,
         )
-
-        return prediction
 
     async def list_recent_predictions(
         self,
@@ -142,7 +144,6 @@ class PredictionAgent:
         limit: int = 50,
     ) -> list[Prediction]:
         symbol = await self.get_symbol(ticker)
-
         if symbol is None:
             return []
 
@@ -152,5 +153,4 @@ class PredictionAgent:
             .order_by(Prediction.timestamp.desc())
             .limit(limit)
         )
-
         return list(result.scalars().all())
