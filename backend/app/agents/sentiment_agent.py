@@ -67,7 +67,7 @@ def _get_openai():
 class SentimentAgent:
 
     OPENAI_THRESHOLD = 0.3
-    CACHE_TTL_SECONDS = 55
+    CACHE_TTL_SECONDS = 300  # 5-min buckets — news doesn't move faster than this intraday
 
     def __init__(self):
         self._cache: dict[str, dict] = {}

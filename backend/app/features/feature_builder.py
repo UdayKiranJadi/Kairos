@@ -4,6 +4,7 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import FeatureSnapshot, MarketBar, Symbol
@@ -240,33 +241,33 @@ class FeatureBuilder:
         features = self.build_features_from_bars(bars)
         inserted_count = 0
 
-        for row in features.to_dict(orient="records"):
-            existing = await self.db.execute(
-                select(FeatureSnapshot).where(
-                    FeatureSnapshot.symbol_id == row["symbol_id"],
-                    FeatureSnapshot.timestamp == row["timestamp"].to_pydatetime(),
-                )
-            )
-            if existing.scalar_one_or_none():
-                continue
+        values = [
+            {
+                "symbol_id":     int(row["symbol_id"]),
+                "timestamp":     row["timestamp"].to_pydatetime(),
+                "return_1m":     safe_float(row["return_1m"]),
+                "return_5m":     safe_float(row["return_5m"]),
+                "volatility_10m": safe_float(row["volatility_10m"]),
+                "volume_zscore": safe_float(row["volume_zscore"]),
+                "price_vs_vwap": safe_float(row["price_vs_vwap"]),
+                "rsi_14":        safe_float(row["rsi_14"]),
+                "macd_signal":   safe_float(row["macd_signal"]),
+                "obv_zscore":    safe_float(row["obv_zscore"]),
+            }
+            for row in features.to_dict(orient="records")
+        ]
 
-            snapshot = FeatureSnapshot(
-                symbol_id=int(row["symbol_id"]),
-                timestamp=row["timestamp"].to_pydatetime(),
-                return_1m=safe_float(row["return_1m"]),
-                return_5m=safe_float(row["return_5m"]),
-                volatility_10m=safe_float(row["volatility_10m"]),
-                volume_zscore=safe_float(row["volume_zscore"]),
-                price_vs_vwap=safe_float(row["price_vs_vwap"]),
-                rsi_14=safe_float(row["rsi_14"]),         # NEW
-                macd_signal=safe_float(row["macd_signal"]), # NEW
-                obv_zscore=safe_float(row["obv_zscore"]),   # NEW
-            )
-            self.db.add(snapshot)
-            inserted_count += 1
+        if not values:
+            return 0
 
+        stmt = (
+            pg_insert(FeatureSnapshot)
+            .values(values)
+            .on_conflict_do_nothing(index_elements=["symbol_id", "timestamp"])
+        )
+        result = await self.db.execute(stmt)
         await self.db.commit()
-        return inserted_count
+        return result.rowcount if result.rowcount is not None else len(values)
 
     async def list_recent_features(
         self,

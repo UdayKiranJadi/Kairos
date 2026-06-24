@@ -195,6 +195,7 @@ export default function App() {
   const { data, connected } = useWS('ws://localhost:8000/ws/live')
   const [logs, setLogs] = useState([])
   const [curveData, setCurveData] = useState([])
+  const [activeView, setActiveView] = useState('dashboard')
 
   useEffect(() => {
     if (!data) return
@@ -230,6 +231,7 @@ export default function App() {
   const agentState = data?.agent_state || {}
   const positions = data?.positions || []
   const orders = data?.orders || []
+  const tradesToday = data?.trades_today ?? 0
 
   const pnlColor = dailyPnl >= 0 ? ACCENT : RED
   const drawdownColor = Math.abs(drawdown) > 0.015 ? RED : Math.abs(drawdown) > 0.008 ? AMBER : ACCENT
@@ -282,19 +284,19 @@ export default function App() {
               Views
             </div>
             {[
-              { icon: 'layout-dashboard', label: 'Mission control', active: true },
-              { icon: 'chart-line', label: 'Equity curve' },
-              { icon: 'brain', label: 'Agent decisions' },
-              { icon: 'news', label: 'Sentiment feed' },
-              { icon: 'shield', label: 'Risk monitor' },
-              { icon: 'list', label: 'Trade ledger' },
-            ].map(({ icon, label, active }) => (
-              <div key={label} style={{
+              { icon: 'layout-dashboard', label: 'Mission control', view: 'dashboard' },
+              { icon: 'chart-line',       label: 'Equity curve',    view: 'equity' },
+              { icon: 'brain',            label: 'Agent decisions', view: 'agents' },
+              { icon: 'news',             label: 'Sentiment feed',  view: 'sentiment' },
+              { icon: 'shield',           label: 'Risk monitor',    view: 'risk' },
+              { icon: 'list',             label: 'Trade ledger',    view: 'ledger' },
+            ].map(({ icon, label, view }) => (
+              <div key={view} onClick={() => setActiveView(view)} style={{
                 display: 'flex', alignItems: 'center', gap: 8,
                 padding: '7px 8px', borderRadius: 6, fontSize: 12,
-                color: active ? ACCENT : MID, cursor: 'pointer', marginBottom: 2,
-                background: active ? '#0d1a2e' : 'transparent',
-                border: active ? `0.5px solid ${ACCENT}20` : '0.5px solid transparent',
+                color: activeView === view ? ACCENT : MID, cursor: 'pointer', marginBottom: 2,
+                background: activeView === view ? '#0d1a2e' : 'transparent',
+                border: activeView === view ? `0.5px solid ${ACCENT}20` : '0.5px solid transparent',
               }}>
                 <i className={`ti ti-${icon}`} style={{ fontSize: 15 }} aria-hidden="true" />
                 {label}
@@ -319,7 +321,7 @@ export default function App() {
               { k: 'Max pos',     v: '2% ($200)',  vc: LIGHT },
               { k: 'Daily cap',   v: '0.5%',       vc: RED },
               { k: 'ATR stop',    v: '2×',         vc: LIGHT },
-              { k: 'Trades today', v: `0 / 3`,     vc: ACCENT },
+              { k: 'Trades today', v: `${tradesToday} / 3`, vc: tradesToday >= 3 ? RED : ACCENT },
               { k: 'Circuit brk', v: 'armed',      vc: ACCENT },
               { k: 'RL ensemble', v: 'active',     vc: PURPLE },
               { k: 'FinBERT',     v: 'active',     vc: BLUE },
@@ -359,13 +361,13 @@ export default function App() {
         {/* Main content */}
         <div style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
 
-          {/* Row 1 — metrics */}
+          {/* ── Metric strip — shown on all views ── */}
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10 }}>
-            <MetricCard 
-  label="Equity" 
-  value={`$${equity.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`} 
-  sub="paper account" 
-/>
+            <MetricCard
+              label="Equity"
+              value={`$${equity.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`}
+              sub="paper account"
+            />
             <MetricCard
               label="Daily P&L"
               value={`${dailyPnl >= 0 ? '+' : ''}$${dailyPnl.toFixed(2)}`}
@@ -386,231 +388,304 @@ export default function App() {
             />
           </div>
 
-          {/* Row 2 — agents + sentiment */}
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+          {/* ── Dashboard view ── */}
+          {activeView === 'dashboard' && (<>
 
-            {/* Agent decisions */}
-            <div style={{ background: CARD, border: `0.5px solid ${BORDER}`, borderRadius: 8, padding: 12 }}>
-              <CardTitle icon="brain">Agent decisions — this cycle</CardTitle>
-              {Object.keys(agentState).length === 0 ? (
-                <div style={{ fontSize: 12, color: MID }}>Waiting for first cycle...</div>
-              ) : (
-                Object.entries(agentState).map(([sym, state]) => {
-                  if (!state) return null
-                  const action = state.action || 'HOLD'
-                  const badgeType = action === 'ENTER_LONG' ? 'buy' :
-                                    action === 'EXIT_POSITION' ? 'sell' : 'hold'
-                  return (
-                    <AgentRow
-                      key={sym}
-                      color={BLUE}
-                      name="Ensemble"
-                      symbol={sym}
-                      sub={state.reason || action}
-                      badge={action}
-                      badgeType={badgeType}
-                    />
-                  )
-                })
-              )}
-
-              {/* Static skeleton when no data */}
-              {Object.keys(agentState).length === 0 && (
-                <>
-                  <AgentRow color={BLUE} name="LogReg" symbol="AAPL" sub="waiting for prediction..." badge="—" badgeType="hold" />
-                  <AgentRow color={PURPLE} name="PPO agent" symbol="AAPL" sub="waiting for RL inference..." badge="—" badgeType="hold" />
-                  <AgentRow color={AMBER} name="Sentiment gate" symbol="AAPL" sub="waiting for FinBERT..." badge="—" badgeType="hold" />
-                  <AgentRow color={ACCENT} name="Risk engine" symbol="final" sub="waiting..." badge="—" badgeType="hold" />
-                </>
-              )}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+              <div style={{ background: CARD, border: `0.5px solid ${BORDER}`, borderRadius: 8, padding: 12 }}>
+                <CardTitle icon="brain">Agent decisions — this cycle</CardTitle>
+                {Object.keys(agentState).length === 0 ? (
+                  <>
+                    <AgentRow color={BLUE}   name="LogReg"        symbol="AAPL"  sub="waiting for prediction..." badge="—" badgeType="hold" />
+                    <AgentRow color={PURPLE} name="PPO agent"     symbol="AAPL"  sub="waiting for RL inference..." badge="—" badgeType="hold" />
+                    <AgentRow color={AMBER}  name="Sentiment gate" symbol="AAPL" sub="waiting for FinBERT..." badge="—" badgeType="hold" />
+                    <AgentRow color={ACCENT} name="Risk engine"   symbol="final" sub="waiting..." badge="—" badgeType="hold" />
+                  </>
+                ) : (
+                  Object.entries(agentState).map(([sym, state]) => {
+                    if (!state) return null
+                    const action = state.action || 'HOLD'
+                    const badgeType = action === 'ENTER_LONG' ? 'buy' : action === 'EXIT_POSITION' ? 'sell' : 'hold'
+                    return <AgentRow key={sym} color={BLUE} name="Ensemble" symbol={sym} sub={state.reason || action} badge={action} badgeType={badgeType} />
+                  })
+                )}
+              </div>
+              <div style={{ background: CARD, border: `0.5px solid ${BORDER}`, borderRadius: 8, padding: 12 }}>
+                <CardTitle icon="news">Sentiment feed</CardTitle>
+                <SentimentBars signal={activeSentiment} />
+                {!activeSentiment && (
+                  <>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 10 }}>
+                      <span style={{ fontSize: 11, color: MID }}>aggregate score</span>
+                      <span style={{ fontSize: 18, color: MID, ...mono }}>—</span>
+                    </div>
+                    <FeatureBar label="bearish" value={0}  max={100} color={RED} />
+                    <FeatureBar label="neutral" value={50} max={100} color={MID} />
+                    <FeatureBar label="bullish" value={0}  max={100} color={ACCENT} />
+                    <div style={{ fontSize: 11, color: DIM, marginTop: 8 }}>FinBERT preloads on bot start</div>
+                  </>
+                )}
+              </div>
             </div>
 
-            {/* Sentiment */}
-            <div style={{ background: CARD, border: `0.5px solid ${BORDER}`, borderRadius: 8, padding: 12 }}>
-              <CardTitle icon="news">Sentiment feed</CardTitle>
-              <SentimentBars signal={activeSentiment} />
-              {!activeSentiment && (
-                <>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 10 }}>
-                    <span style={{ fontSize: 11, color: MID }}>aggregate score</span>
-                    <span style={{ fontSize: 18, color: MID, ...mono }}>—</span>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+              <div style={{ background: CARD, border: `0.5px solid ${BORDER}`, borderRadius: 8, padding: 12 }}>
+                <CardTitle icon="chart-line">Equity curve</CardTitle>
+                <div style={{ height: 120 }}>
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={curveData.length > 1 ? curveData : [{ t: 'start', equity: 10000 }, { t: 'now', equity: equity }]}>
+                      <XAxis dataKey="t" tick={false} axisLine={false} tickLine={false} />
+                      <YAxis domain={['auto', 'auto']} tick={{ fontSize: 10, fill: DIM, fontFamily: 'monospace' }} width={60} tickFormatter={v => `$${v.toFixed(0)}`} axisLine={false} tickLine={false} />
+                      <Tooltip contentStyle={{ background: CARD, border: `0.5px solid ${BORDER}`, fontSize: 11 }} formatter={v => [`$${v.toFixed(2)}`, 'equity']} />
+                      <ReferenceLine y={10000} stroke={BORDER} strokeDasharray="3 2" />
+                      <Line type="monotone" dataKey="equity" stroke={ACCENT} strokeWidth={1.5} dot={false} />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+                <div style={{ height: 0.5, background: BORDER, margin: '8px 0' }} />
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
+                  {[
+                    { label: 'total P&L',   value: `${dailyPnl >= 0 ? '+' : ''}$${dailyPnl.toFixed(2)}`, color: pnlColor },
+                    { label: 'positions',   value: positions.length, color: LIGHT },
+                    { label: 'trades today', value: `${tradesToday} / 3`, color: tradesToday >= 3 ? RED : BLUE },
+                  ].map(({ label, value, color }) => (
+                    <div key={label}>
+                      <div style={{ fontSize: 10, color: DIM, marginBottom: 3 }}>{label}</div>
+                      <div style={{ fontSize: 14, fontWeight: 500, color, ...mono }}>{value}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <div style={{ background: CARD, border: `0.5px solid ${BORDER}`, borderRadius: 8, padding: 12 }}>
+                <CardTitle icon="activity">Live features — AAPL</CardTitle>
+                {stream['AAPL'] ? (
+                  <div style={{ marginBottom: 8 }}>
+                    <div style={{ fontSize: 10, color: DIM, marginBottom: 4 }}>current price</div>
+                    <div style={{ fontSize: 18, fontWeight: 500, color: LIGHT, ...mono }}>
+                      ${stream['AAPL'].close?.toFixed(2)}
+                      <span style={{ fontSize: 11, color: ACCENT, marginLeft: 8 }}>live</span>
+                    </div>
                   </div>
-                  <FeatureBar label="bearish" value={0} max={100} color={RED} />
-                  <FeatureBar label="neutral" value={50} max={100} color={MID} />
-                  <FeatureBar label="bullish" value={0} max={100} color={ACCENT} />
-                  <div style={{ height: 0.5, background: BORDER, margin: '8px 0' }} />
-                  <div style={{ fontSize: 11, color: DIM }}>FinBERT loads on first market cycle</div>
-                </>
-              )}
+                ) : (
+                  <div style={{ fontSize: 11, color: DIM, marginBottom: 8 }}>market closed — last known values</div>
+                )}
+                <div style={{ height: 0.5, background: BORDER, margin: '6px 0 10px' }} />
+                {(() => {
+                  const f = agentState['AAPL']?.features
+                  return f ? (<>
+                    <FeatureBar label="RSI(14)" value={f.rsi_14 || 0} max={1} color={BLUE} />
+                    <FeatureBar label="MACD"    value={f.macd_signal || 0} max={3} color={PURPLE} />
+                    <FeatureBar label="OBV z"   value={f.obv_zscore || 0} max={3} color={ACCENT} />
+                    <FeatureBar label="vol z"   value={f.volume_zscore || 0} max={3} color={AMBER} />
+                    <FeatureBar label="vs VWAP" value={f.price_vs_vwap || 0} max={0.02} color={MID} />
+                  </>) : (<>
+                    <FeatureBar label="RSI(14)" value={0.24}  max={1}    color={BLUE} />
+                    <FeatureBar label="MACD"    value={0.15}  max={3}    color={PURPLE} />
+                    <FeatureBar label="OBV z"   value={1.42}  max={3}    color={ACCENT} />
+                    <FeatureBar label="vol z"   value={1.80}  max={3}    color={AMBER} />
+                    <FeatureBar label="vs VWAP" value={0.003} max={0.02} color={MID} />
+                  </>)
+                })()}
+              </div>
             </div>
-          </div>
 
-          {/* Row 3 — equity curve + features */}
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+            {positions.length > 0 && (
+              <div style={{ background: CARD, border: `0.5px solid ${BORDER}`, borderRadius: 8, padding: 12 }}>
+                <CardTitle icon="briefcase">Open positions</CardTitle>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 10 }}>
+                  {positions.map((pos, i) => {
+                    const pnl = pos.unrealized_pnl || 0
+                    return (
+                      <div key={i} style={{ padding: 10, background: BG, borderRadius: 6, border: `0.5px solid ${BORDER}` }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+                          <span style={{ fontSize: 14, color: BLUE, fontWeight: 500 }}>{pos.ticker}</span>
+                          <span style={{ fontSize: 13, color: pnl >= 0 ? ACCENT : RED, fontWeight: 500, ...mono }}>
+                            {pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}
+                          </span>
+                        </div>
+                        <div style={{ fontSize: 11, color: MID }}>{pos.quantity} shares @ ${pos.avg_entry_price?.toFixed(2)}</div>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            )}
 
-            {/* Equity curve */}
             <div style={{ background: CARD, border: `0.5px solid ${BORDER}`, borderRadius: 8, padding: 12 }}>
-              <CardTitle icon="chart-line">Equity curve</CardTitle>
-              <div style={{ height: 120 }}>
+              <CardTitle icon="terminal">Bot log</CardTitle>
+              {logs.length === 0 ? (
+                <>
+                  <LogLine time="--:--:--" sym="SYS" msg="waiting for first market cycle..." level="" />
+                  <LogLine time="--:--:--" sym="SYS" msg="market opens 09:30 ET" level="" />
+                </>
+              ) : logs.slice(0, 8).map((l, i) => <LogLine key={i} time={l.time} sym={l.sym} msg={l.msg} level={l.level} />)}
+            </div>
+          </>)}
+
+          {/* ── Equity curve view ── */}
+          {activeView === 'equity' && (
+            <div style={{ background: CARD, border: `0.5px solid ${BORDER}`, borderRadius: 8, padding: 16 }}>
+              <CardTitle icon="chart-line">Equity curve — full session</CardTitle>
+              <div style={{ height: 320 }}>
                 <ResponsiveContainer width="100%" height="100%">
                   <LineChart data={curveData.length > 1 ? curveData : [{ t: 'start', equity: 10000 }, { t: 'now', equity: equity }]}>
-                    <XAxis dataKey="t" tick={false} axisLine={false} tickLine={false} />
-                    <YAxis
-                      domain={['auto', 'auto']}
-                      tick={{ fontSize: 10, fill: DIM, fontFamily: 'monospace' }}
-                      width={60}
-                      tickFormatter={v => `$${v.toFixed(0)}`}
-                      axisLine={false}
-                      tickLine={false}
-                    />
-                    <Tooltip
-                      contentStyle={{ background: CARD, border: `0.5px solid ${BORDER}`, fontSize: 11 }}
-                      formatter={v => [`$${v.toFixed(2)}`, 'equity']}
-                    />
-                    <ReferenceLine y={10000} stroke={BORDER} strokeDasharray="3 2" />
-                    <Line
-                      type="monotone" dataKey="equity"
-                      stroke={ACCENT} strokeWidth={1.5} dot={false}
-                    />
+                    <XAxis dataKey="t" tick={{ fontSize: 10, fill: DIM, fontFamily: 'monospace' }} axisLine={false} tickLine={false} interval="preserveStartEnd" />
+                    <YAxis domain={['auto', 'auto']} tick={{ fontSize: 10, fill: DIM, fontFamily: 'monospace' }} width={68} tickFormatter={v => `$${v.toFixed(0)}`} axisLine={false} tickLine={false} />
+                    <Tooltip contentStyle={{ background: CARD, border: `0.5px solid ${BORDER}`, fontSize: 11 }} formatter={v => [`$${v.toFixed(2)}`, 'equity']} />
+                    <ReferenceLine y={10000} stroke={BORDER} strokeDasharray="3 2" label={{ value: 'start', fill: DIM, fontSize: 10 }} />
+                    <Line type="monotone" dataKey="equity" stroke={ACCENT} strokeWidth={2} dot={false} />
                   </LineChart>
                 </ResponsiveContainer>
               </div>
-              <div style={{ height: 0.5, background: BORDER, margin: '8px 0' }} />
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
+              <div style={{ height: 0.5, background: BORDER, margin: '12px 0' }} />
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 10 }}>
                 {[
-                  { label: 'total P&L', value: `${dailyPnl >= 0 ? '+' : ''}$${dailyPnl.toFixed(2)}`, color: pnlColor },
-                  { label: 'positions', value: positions.length, color: LIGHT },
-                  { label: 'fills today', value: orders.length, color: BLUE },
+                  { label: 'equity',       value: `$${equity.toLocaleString('en-US', {minimumFractionDigits: 2})}`, color: LIGHT },
+                  { label: 'daily P&L',    value: `${dailyPnl >= 0 ? '+' : ''}$${dailyPnl.toFixed(2)}`, color: pnlColor },
+                  { label: 'drawdown',     value: `${(Math.abs(drawdown) * 100).toFixed(3)}%`, color: drawdownColor },
+                  { label: 'Sharpe',       value: sharpe.toFixed(2), color: sharpe > 1 ? ACCENT : sharpe > 0 ? AMBER : RED },
+                  { label: 'trades today', value: `${tradesToday} / 3`, color: tradesToday >= 3 ? RED : BLUE },
                 ].map(({ label, value, color }) => (
-                  <div key={label}>
-                    <div style={{ fontSize: 10, color: DIM, marginBottom: 3 }}>{label}</div>
-                    <div style={{ fontSize: 14, fontWeight: 500, color, ...mono }}>{value}</div>
+                  <div key={label} style={{ background: BG, borderRadius: 6, padding: '10px 12px', border: `0.5px solid ${BORDER}` }}>
+                    <div style={{ fontSize: 10, color: DIM, marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.06em' }}>{label}</div>
+                    <div style={{ fontSize: 18, fontWeight: 500, color, ...mono }}>{value}</div>
                   </div>
                 ))}
               </div>
             </div>
+          )}
 
-            {/* Live features */}
-            <div style={{ background: CARD, border: `0.5px solid ${BORDER}`, borderRadius: 8, padding: 12 }}>
-              <CardTitle icon="activity">Live features — AAPL</CardTitle>
-              {stream['AAPL'] ? (
-                <div style={{ marginBottom: 8 }}>
-                  <div style={{ fontSize: 10, color: DIM, marginBottom: 4 }}>current price</div>
-                  <div style={{ fontSize: 18, fontWeight: 500, color: LIGHT, ...mono }}>
-                    ${stream['AAPL'].close?.toFixed(2)}
-                    <span style={{ fontSize: 11, color: ACCENT, marginLeft: 8 }}>live</span>
-                  </div>
+          {/* ── Agent decisions view ── */}
+          {activeView === 'agents' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {Object.entries(agentState).length === 0 ? (
+                <div style={{ background: CARD, border: `0.5px solid ${BORDER}`, borderRadius: 8, padding: 16, color: MID, fontSize: 12 }}>
+                  Waiting for first cycle — no agent state yet.
                 </div>
-              ) : (
-                <div style={{ fontSize: 11, color: DIM, marginBottom: 8 }}>market closed — last known values</div>
-              )}
-              <div style={{ height: 0.5, background: BORDER, margin: '6px 0 10px' }} />
-              {agentState['AAPL']?.features ? (
-                <>
-                  <FeatureBar label="RSI(14)" value={agentState['AAPL'].features.rsi_14 || 0} max={1} color={BLUE} />
-                  <FeatureBar label="MACD" value={agentState['AAPL'].features.macd_signal || 0} max={3} color={PURPLE} />
-                  <FeatureBar label="OBV z" value={agentState['AAPL'].features.obv_zscore || 0} max={3} color={ACCENT} />
-                  <FeatureBar label="vol z" value={agentState['AAPL'].features.volume_zscore || 0} max={3} color={AMBER} />
-                  <FeatureBar label="vs VWAP" value={agentState['AAPL'].features.price_vs_vwap || 0} max={0.02} color={MID} />
-                </>
-              ) : (
-                <>
-                  <FeatureBar label="RSI(14)" value={0.24} max={1} color={BLUE} />
-                  <FeatureBar label="MACD" value={0.15} max={3} color={PURPLE} />
-                  <FeatureBar label="OBV z" value={1.42} max={3} color={ACCENT} />
-                  <FeatureBar label="vol z" value={1.80} max={3} color={AMBER} />
-                  <FeatureBar label="vs VWAP" value={0.003} max={0.02} color={MID} />
-                </>
-              )}
-            </div>
-          </div>
-
-          {/* Row 4 — open positions */}
-          {positions.length > 0 && (
-            <div style={{ background: CARD, border: `0.5px solid ${BORDER}`, borderRadius: 8, padding: 12 }}>
-              <CardTitle icon="briefcase">Open positions</CardTitle>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 10 }}>
-                {positions.map((pos, i) => {
-                  const pnl = pos.unrealized_pnl || 0
-                  return (
-                    <div key={i} style={{ padding: 10, background: BG, borderRadius: 6, border: `0.5px solid ${BORDER}` }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
-                        <span style={{ fontSize: 14, color: BLUE, fontWeight: 500 }}>{pos.ticker}</span>
-                        <span style={{ fontSize: 13, color: pnl >= 0 ? ACCENT : RED, fontWeight: 500, ...mono }}>
-                          {pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}
-                        </span>
+              ) : Object.entries(agentState).map(([sym, state]) => {
+                if (!state) return null
+                const action = state.action || 'HOLD'
+                const badgeType = action === 'ENTER_LONG' ? 'buy' : action === 'EXIT_POSITION' ? 'sell' : 'hold'
+                const f = state.features || {}
+                return (
+                  <div key={sym} style={{ background: CARD, border: `0.5px solid ${BORDER}`, borderRadius: 8, padding: 14 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                      <span style={{ fontSize: 16, fontWeight: 500, color: BLUE }}>{sym}</span>
+                      <AgentRow color={BLUE} name="Ensemble" symbol="" sub="" badge={action} badgeType={badgeType} />
+                    </div>
+                    <div style={{ fontSize: 11, color: MID, marginBottom: 12, lineHeight: 1.5 }}>{state.reason}</div>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                      <div>
+                        <div style={{ fontSize: 10, color: DIM, marginBottom: 8, textTransform: 'uppercase' }}>Features</div>
+                        <FeatureBar label="RSI(14)" value={f.rsi_14 || 0} max={1} color={BLUE} />
+                        <FeatureBar label="MACD"    value={f.macd_signal || 0} max={3} color={PURPLE} />
+                        <FeatureBar label="OBV z"   value={f.obv_zscore || 0} max={3} color={ACCENT} />
+                        <FeatureBar label="vol z"   value={f.volume_zscore || 0} max={3} color={AMBER} />
+                        <FeatureBar label="vs VWAP" value={f.price_vs_vwap || 0} max={0.02} color={MID} />
                       </div>
-                      <div style={{ fontSize: 11, color: MID }}>
-                        {pos.quantity} shares @ ${pos.avg_entry_price?.toFixed(2)}
+                      <div>
+                        <div style={{ fontSize: 10, color: DIM, marginBottom: 8, textTransform: 'uppercase' }}>Sentiment</div>
+                        <SentimentBars signal={state.sentiment} />
                       </div>
                     </div>
-                  )
-                })}
+                  </div>
+                )
+              })}
+            </div>
+          )}
+
+          {/* ── Sentiment view ── */}
+          {activeView === 'sentiment' && (
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+              {['AAPL', 'NVDA'].map(sym => {
+                const signal = agentState[sym]?.sentiment || null
+                return (
+                  <div key={sym} style={{ background: CARD, border: `0.5px solid ${BORDER}`, borderRadius: 8, padding: 14 }}>
+                    <div style={{ fontSize: 14, fontWeight: 500, color: BLUE, marginBottom: 10 }}>{sym}</div>
+                    <SentimentBars signal={signal} />
+                    {!signal && <div style={{ fontSize: 11, color: DIM }}>No signal yet — waiting for market hours.</div>}
+                  </div>
+                )
+              })}
+            </div>
+          )}
+
+          {/* ── Risk monitor view ── */}
+          {activeView === 'risk' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10 }}>
+                {[
+                  { label: 'Daily loss',     value: `${(Math.abs(dailyPnl / (equity || 1)) * 100).toFixed(3)}%`, limit: '0.5%', ok: Math.abs(dailyPnl / (equity || 1)) < 0.005 },
+                  { label: 'Total drawdown', value: `${(Math.abs(drawdown) * 100).toFixed(3)}%`,                  limit: '2.0%', ok: Math.abs(drawdown) < 0.02 },
+                  { label: 'Trades today',   value: `${tradesToday}`,                                              limit: '3',    ok: tradesToday < 3 },
+                ].map(({ label, value, limit, ok }) => (
+                  <div key={label} style={{ background: CARD, border: `0.5px solid ${ok ? BORDER : RED + '40'}`, borderRadius: 8, padding: 14 }}>
+                    <div style={{ fontSize: 10, color: DIM, marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.06em' }}>{label}</div>
+                    <div style={{ fontSize: 24, fontWeight: 500, color: ok ? ACCENT : RED, ...mono }}>{value}</div>
+                    <div style={{ fontSize: 11, color: MID, marginTop: 4 }}>limit: {limit}</div>
+                    <Dot color={ok ? ACCENT : RED} size={8} />
+                  </div>
+                ))}
+              </div>
+              <div style={{ background: CARD, border: `0.5px solid ${BORDER}`, borderRadius: 8, padding: 14 }}>
+                <CardTitle icon="shield">Risk policy — hard limits</CardTitle>
+                {[
+                  { k: 'Max position size',        v: '2% of portfolio',           status: true },
+                  { k: 'ATR stop-loss multiplier',  v: '2× ATR',                   status: true },
+                  { k: 'Daily loss circuit breaker', v: '0.5% → halt all trading', status: true },
+                  { k: 'Total drawdown limit',       v: '2.0% → halt all trading', status: true },
+                  { k: 'Max trades per day',         v: '3',                        status: tradesToday < 3 },
+                  { k: 'Max open positions',         v: '1',                        status: positions.length < 1 },
+                  { k: 'Min model confidence',       v: '70%',                      status: true },
+                  { k: 'Trading mode',               v: 'paper only',               status: true },
+                ].map(({ k, v, status }) => (
+                  <div key={k} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '7px 0', borderBottom: `0.5px solid ${BORDER}` }}>
+                    <span style={{ fontSize: 12, color: MID }}>{k}</span>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <span style={{ fontSize: 12, color: LIGHT, ...mono }}>{v}</span>
+                      <Dot color={status ? ACCENT : RED} size={7} />
+                    </div>
+                  </div>
+                ))}
               </div>
             </div>
           )}
 
-          {/* Row 5 — bot log */}
-          <div style={{ background: CARD, border: `0.5px solid ${BORDER}`, borderRadius: 8, padding: 12 }}>
-            <CardTitle icon="terminal">Bot log</CardTitle>
-            {logs.length === 0 ? (
-              <>
-                <LogLine time="--:--:--" sym="SYS" msg="waiting for first market cycle..." level="" />
-                <LogLine time="--:--:--" sym="SYS" msg="market opens 09:30 ET" level="" />
-              </>
-            ) : (
-              logs.slice(0, 8).map((l, i) => (
-                <LogLine key={i} time={l.time} sym={l.sym} msg={l.msg} level={l.level} />
-              ))
-            )}
-          </div>
-
-          {/* Row 6 — recent trades */}
-          <div style={{ background: CARD, border: `0.5px solid ${BORDER}`, borderRadius: 8, padding: 12 }}>
-            <CardTitle icon="list">Recent executions</CardTitle>
-            {orders.length === 0 ? (
-              <div style={{ fontSize: 12, color: DIM }}>No trades executed yet.</div>
-            ) : (
-              <div style={{ overflowX: 'auto' }}>
-                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
-                  <thead>
-                    <tr style={{ borderBottom: `0.5px solid ${BORDER}` }}>
-                      {['Time', 'Symbol', 'Side', 'Qty', 'Price', 'Status'].map(h => (
-                        <th key={h} style={{
-                          padding: '4px 8px', textAlign: 'left',
-                          fontSize: 10, color: DIM, fontWeight: 400,
-                          letterSpacing: '0.06em', textTransform: 'uppercase'
-                        }}>{h}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {orders.map(o => (
-                      <tr key={o.id} style={{ borderBottom: `0.5px solid #0d1a2e` }}>
-                        <td style={{ padding: '5px 8px', color: MID, ...mono }}>
-                          {new Date(o.timestamp).toLocaleTimeString()}
-                        </td>
-                        <td style={{ padding: '5px 8px', color: BLUE, fontWeight: 500 }}>{o.ticker}</td>
-                        <td style={{ padding: '5px 8px', color: o.side === 'buy' ? ACCENT : RED, fontWeight: 500 }}>
-                          {o.side?.toUpperCase()}
-                        </td>
-                        <td style={{ padding: '5px 8px', color: LIGHT, ...mono }}>{o.qty}</td>
-                        <td style={{ padding: '5px 8px', color: LIGHT, ...mono }}>
-                          ${o.price?.toFixed(2) || '—'}
-                        </td>
-                        <td style={{ padding: '5px 8px' }}>
-                          <span style={{
-                            fontSize: 10, padding: '2px 8px', borderRadius: 10,
-                            background: '#1e2a3a', color: BLUE
-                          }}>{o.status}</span>
-                        </td>
+          {/* ── Trade ledger view ── */}
+          {activeView === 'ledger' && (
+            <div style={{ background: CARD, border: `0.5px solid ${BORDER}`, borderRadius: 8, padding: 14 }}>
+              <CardTitle icon="list">All executions</CardTitle>
+              {orders.length === 0 ? (
+                <div style={{ fontSize: 12, color: DIM, padding: '20px 0' }}>No trades executed yet.</div>
+              ) : (
+                <div style={{ overflowX: 'auto' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                    <thead>
+                      <tr style={{ borderBottom: `0.5px solid ${BORDER}` }}>
+                        {['Time', 'Symbol', 'Side', 'Qty', 'Price', 'Status'].map(h => (
+                          <th key={h} style={{ padding: '4px 8px', textAlign: 'left', fontSize: 10, color: DIM, fontWeight: 400, letterSpacing: '0.06em', textTransform: 'uppercase' }}>{h}</th>
+                        ))}
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </div>
+                    </thead>
+                    <tbody>
+                      {orders.map(o => (
+                        <tr key={o.id} style={{ borderBottom: `0.5px solid #0d1a2e` }}>
+                          <td style={{ padding: '5px 8px', color: MID, ...mono }}>{new Date(o.timestamp).toLocaleTimeString()}</td>
+                          <td style={{ padding: '5px 8px', color: BLUE, fontWeight: 500 }}>{o.ticker}</td>
+                          <td style={{ padding: '5px 8px', color: o.side === 'buy' ? ACCENT : RED, fontWeight: 500 }}>{o.side?.toUpperCase()}</td>
+                          <td style={{ padding: '5px 8px', color: LIGHT, ...mono }}>{o.qty}</td>
+                          <td style={{ padding: '5px 8px', color: LIGHT, ...mono }}>${o.price?.toFixed(2) || '—'}</td>
+                          <td style={{ padding: '5px 8px' }}>
+                            <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 10, background: '#1e2a3a', color: BLUE }}>{o.status}</span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
 
         </div>
       </div>

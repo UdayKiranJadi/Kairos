@@ -11,6 +11,8 @@ import numpy as np
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from sqlalchemy import select, desc
 
+from sqlalchemy import func
+
 from app.core.redis_client import get_redis
 from app.db.models import PaperOrder, Position, PortfolioSnapshot, Symbol
 from app.db.session import AsyncSessionLocal
@@ -73,6 +75,21 @@ async def _build_payload(db) -> dict:
         }
         for row in pos_result.all()
     ]
+
+    # ── Trades today ──────────────────────────────────────────────
+    trades_today = 0
+    try:
+        today_start = datetime.now(timezone.utc).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        trades_today_result = await db.execute(
+            select(func.count(PaperOrder.id)).where(
+                PaperOrder.timestamp >= today_start
+            )
+        )
+        trades_today = trades_today_result.scalar() or 0
+    except Exception:
+        pass
 
     # ── Recent orders ─────────────────────────────────────────────
     order_result = await db.execute(
@@ -152,6 +169,7 @@ async def _build_payload(db) -> dict:
         "stream":       stream_state,
         "equity_curve": equity_curve,
         "sharpe":       sharpe,
+        "trades_today": trades_today,
     }
 
 

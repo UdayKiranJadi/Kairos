@@ -105,12 +105,13 @@ class AutonomousBot:
         logreg_action: str,
         logreg_confidence: float,
         latest_features: dict,
+        unrealized_pnl: float = 0.0,
     ) -> tuple[str, float, str]:
         if _rl_agent is None:
             return logreg_action, logreg_confidence, "LogReg only (no RL model)"
 
         try:
-            rl_result = _rl_agent.predict(latest_features)
+            rl_result = _rl_agent.predict(latest_features, unrealized_pnl=unrealized_pnl)
             rl_bearish = rl_result["action"] == 1
             rl_conf = rl_result["confidence"]
 
@@ -157,6 +158,11 @@ class AutonomousBot:
 
         # ── 2. ATR stop-loss check ────────────────────────────────
         position = self.broker.get_open_position(symbol)
+        unrealized_pnl_pct = 0.0
+        if position and position.avg_entry_price and float(position.avg_entry_price) > 0:
+            entry = float(position.avg_entry_price)
+            current = float(position.current_price or 0)
+            unrealized_pnl_pct = (current - entry) / entry
         if position:
             entry_price = float(position.avg_entry_price)
             current_price = float(position.current_price or 0)
@@ -277,7 +283,7 @@ class AutonomousBot:
 
         # ── 8. RL ensemble ────────────────────────────────────────
         final_action, final_conf, ensemble_reason = self._apply_rl_ensemble(
-            logreg_action, logreg_conf, latest_features
+            logreg_action, logreg_conf, latest_features, unrealized_pnl=unrealized_pnl_pct
         )
         logger.info(f"[{symbol}] {ensemble_reason}")
 
@@ -325,11 +331,23 @@ class AutonomousBot:
             f"price={current_price:.2f}"
         )
 
+    async def _run_symbol_with_own_session(
+        self, sym: str, live_state: dict, trades_today: int
+    ) -> None:
+        async with AsyncSessionLocal() as session:
+            await self.run_pipeline_for_symbol(session, sym, live_state, trades_today)
+
     async def start(self) -> None:
         logger.info(f"Kairos starting | symbols={self.symbols}")
         logger.info(
             f"RL ensemble: {'active' if _rl_agent else 'inactive (LogReg only)'}"
         )
+
+        # Preload FinBERT once at startup so the first trading cycle
+        # doesn't block for ~10s waiting for model weights to load.
+        logger.info("Preloading FinBERT...")
+        await asyncio.to_thread(_sentiment_agent._build_signal, self.symbols[0], {})
+        logger.info("FinBERT ready")
 
         while True:
             try:
@@ -340,6 +358,7 @@ class AutonomousBot:
 
                 logger.info("─── Cycle start ───")
 
+                # Portfolio sync gets its own short-lived session.
                 async with AsyncSessionLocal() as session:
                     portfolio_agent = PortfolioAgent(session)
                     live_state = await portfolio_agent.sync_and_get_state()
@@ -350,48 +369,48 @@ class AutonomousBot:
                         total_drawdown_pct=live_state["total_drawdown_pct"],
                     )
 
-                    if should_halt:
-                        logger.warning(f"CIRCUIT BREAKER: {halt_reason}")
-                        await alert(
-                            f"CIRCUIT BREAKER FIRED\n"
-                            f"{halt_reason}\n"
-                            f"Equity: ${live_state['portfolio_value']:.2f}",
-                            level=AlertLevel.CRITICAL,
-                            subject="Circuit breaker — trading halted",
-                        )
-                        await asyncio.sleep(60)
-                        continue
-
                     trades_today = await self._trades_today(session)
-                    logger.info(
-                        f"Portfolio | "
-                        f"equity=${live_state['portfolio_value']:.2f} | "
-                        f"positions={live_state['open_positions']} | "
-                        f"trades_today={trades_today}"
-                    )
 
-                    # ── Parallel symbol processing ─────────────────
-                    # WHY asyncio.gather:
-                    # Sequential: N symbols × 3s each = N×3s per cycle
-                    # Parallel:   N symbols × 3s each = 3s per cycle
-                    # return_exceptions=True means one symbol crashing
-                    # does not stop other symbols from processing.
-                    results = await asyncio.gather(
-                        *[
-                            self.run_pipeline_for_symbol(
-                                session, sym, live_state, trades_today
-                            )
-                            for sym in self.symbols
-                        ],
-                        return_exceptions=True,
+                if should_halt:
+                    logger.warning(f"CIRCUIT BREAKER: {halt_reason}")
+                    await alert(
+                        f"CIRCUIT BREAKER FIRED\n"
+                        f"{halt_reason}\n"
+                        f"Equity: ${live_state['portfolio_value']:.2f}",
+                        level=AlertLevel.CRITICAL,
+                        subject="Circuit breaker — trading halted",
                     )
+                    await asyncio.sleep(60)
+                    continue
 
-                    # Log per-symbol errors without crashing the cycle
-                    for sym, result in zip(self.symbols, results):
-                        if isinstance(result, Exception):
-                            logger.error(
-                                f"[{sym}] Pipeline error: {result}"
-                            )
+                logger.info(
+                    f"Portfolio | "
+                    f"equity=${live_state['portfolio_value']:.2f} | "
+                    f"positions={live_state['open_positions']} | "
+                    f"trades_today={trades_today}"
+                )
+
+                # ── Parallel symbol processing ─────────────────
+                # Each symbol gets its own AsyncSession so concurrent
+                # coroutines don't share state across one session.
+                # return_exceptions=True: one symbol failing never
+                # blocks the others.
+                results = await asyncio.gather(
+                    *[
+                        self._run_symbol_with_own_session(
+                            sym, live_state, trades_today
+                        )
+                        for sym in self.symbols
+                    ],
+                    return_exceptions=True,
+                )
+
+                # Log per-symbol errors without crashing the cycle
+                for sym, result in zip(self.symbols, results):
+                    if isinstance(result, Exception):
+                        logger.error(
+                            f"[{sym}] Pipeline error: {result}"
+                        )
 
                 now = datetime.now()
                 sleep_secs = 60 - now.second

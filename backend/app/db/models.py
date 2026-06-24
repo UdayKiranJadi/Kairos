@@ -71,6 +71,9 @@ class MarketBar(Base):
 
 class FeatureSnapshot(Base):
     __tablename__ = "feature_snapshots"
+    __table_args__ = (
+        UniqueConstraint("symbol_id", "timestamp", name="uq_feature_snapshot"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     symbol_id: Mapped[int] = mapped_column(ForeignKey("symbols.id"), index=True)

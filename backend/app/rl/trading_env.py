@@ -17,14 +17,17 @@ WHEN to exit — which is the harder and more valuable skill.
 This mirrors how real momentum strategies work: signals
 trigger entry, the model manages exit timing.
 
-OBSERVATION SPACE (7 dimensions):
+OBSERVATION SPACE (10 dimensions):
   [0] return_1m        — recent momentum
-  [1] return_5m        — medium momentum  
+  [1] return_5m        — medium momentum
   [2] volatility_10m   — market volatility
   [3] volume_zscore    — volume signal
   [4] price_vs_vwap    — price vs average
-  [5] holding_steps    — how long in trade (normalized)
-  [6] unrealized_pnl   — current P&L (normalized)
+  [5] rsi_14           — RSI normalized [-1, +1]
+  [6] macd_signal      — MACD signal line normalized
+  [7] obv_zscore       — On-Balance Volume z-score
+  [8] holding_steps    — how long in trade (normalized 0-1)
+  [9] unrealized_pnl   — current P&L normalized [-1, +1]
 
 ACTION SPACE (2 discrete):
   0 = HOLD  — stay in position
@@ -65,6 +68,7 @@ class TradingEnv(gym.Env):
         initial_cash: float = 10_000.0,
         max_holding_steps: int = 30,
         transaction_cost_pct: float = 0.001,
+        min_hold_steps: int = 3,
     ):
         super().__init__()
 
@@ -83,6 +87,7 @@ class TradingEnv(gym.Env):
         self.initial_cash = initial_cash
         self.max_holding_steps = max_holding_steps
         self.transaction_cost_pct = transaction_cost_pct
+        self.min_hold_steps = min_hold_steps
 
         # 2 actions: 0=HOLD, 1=SELL
         self.action_space = spaces.Discrete(2)
@@ -134,18 +139,28 @@ class TradingEnv(gym.Env):
             trade_return = (exit_price - self._entry_price) / self._entry_price
             self._returns.append(trade_return)
 
-            # Reward: percentage return scaled to [-1, 1]
-            # 1% profit → +1.0, 1% loss → -1.0
-            reward = float(np.clip(trade_return * 100.0, -1.0, 1.0))
+            base_reward = float(np.clip(trade_return * 100.0, -1.0, 1.0))
+
+            # Penalise premature exits so the agent can't escape by selling immediately.
+            # Penalty decays linearly from 0.4 at step 0 to 0 at min_hold_steps.
+            if self._holding_steps < self.min_hold_steps:
+                fraction_held = self._holding_steps / max(self.min_hold_steps, 1)
+                early_exit_penalty = 0.4 * (1.0 - fraction_held)
+                reward = base_reward - early_exit_penalty
+            else:
+                reward = base_reward
+
             terminated = True
 
         else:  # HOLD
             self._holding_steps += 1
             unrealized = (price - self._entry_price) / self._entry_price
 
-            # Small signal: positive when winning, negative when losing
-            # Teaches agent to cut losses and let winners run
-            reward = float(np.clip(unrealized * 5.0, -0.05, 0.05))
+            # Stronger asymmetric signal:
+            #   winning position → encourage holding (+0.10 max)
+            #   losing position  → encourage cutting (-0.10 max)
+            # 10× scale vs. original 5× gives the agent a clearer gradient.
+            reward = float(np.clip(unrealized * 10.0, -0.10, 0.10))
 
             # Force-close at max_holding_steps
             if self._holding_steps >= self.max_holding_steps:

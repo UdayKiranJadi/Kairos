@@ -79,15 +79,13 @@ class RLAgent:
         features: dict,
         holding_steps: int = 0,
         max_holding_steps: int = 30,
+        unrealized_pnl: float = 0.0,
     ) -> np.ndarray:
         """
-        Build 7-dim observation vector from feature dict.
+        Build 10-dim observation vector from feature dict.
 
         Matches TradingEnv v2 observation space exactly:
-          [5 market features, holding_steps_normalized, unrealized_pnl]
-
-        For live inference, unrealized_pnl comes from the
-        portfolio agent. holding_steps from position tracking.
+          [8 market features, holding_steps_normalized, unrealized_pnl_normalized]
         """
         market = np.array(
             [float(features.get(col, 0.0) or 0.0) for col in self.FEATURE_COLS],
@@ -97,7 +95,7 @@ class RLAgent:
         position = np.array(
             [
                 float(holding_steps) / float(max_holding_steps),
-                0.0,  # unrealized PnL — passed in from portfolio if available
+                float(np.clip(unrealized_pnl * 10.0, -1.0, 1.0)),
             ],
             dtype=np.float32,
         )
@@ -109,6 +107,7 @@ class RLAgent:
         self,
         features: dict,
         holding_steps: int = 0,
+        unrealized_pnl: float = 0.0,
         deterministic: bool = True,
     ) -> dict:
         """
@@ -126,7 +125,7 @@ class RLAgent:
           HOLD → bullish (agent wants to stay in position)
           SELL → bearish (agent wants to exit)
         """
-        obs = self.build_observation(features, holding_steps)
+        obs = self.build_observation(features, holding_steps, unrealized_pnl=unrealized_pnl)
 
         # predict() returns (action, state)
         # We use deterministic=True for live trading

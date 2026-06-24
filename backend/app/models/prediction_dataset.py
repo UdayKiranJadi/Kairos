@@ -108,12 +108,23 @@ class PredictionDatasetBuilder:
         df: pd.DataFrame,
         horizon_minutes: int = 5,
         min_abs_future_return: float = 0.0,
+        warmup_bars: int = 30,
     ) -> pd.DataFrame:
         if df.empty:
             return df
 
         data = df.copy()
         data = data.sort_values("timestamp").reset_index(drop=True)
+
+        # Drop the first `warmup_bars` bars of each trading day.
+        # MACD slow EMA (26 bars), RSI (14), OBV z-score (20) all need
+        # warmup to produce valid values. Rows before bar 30 of the day
+        # have cold EMAs and pollute the training signal.
+        data["_trading_day"] = data["timestamp"].dt.date
+        data["_bar_of_day"] = data.groupby("_trading_day").cumcount()
+        data = data[data["_bar_of_day"] >= warmup_bars].drop(
+            columns=["_trading_day", "_bar_of_day"]
+        )
 
         data["future_close"] = data["close"].shift(-horizon_minutes)
         data["future_return"] = (data["future_close"] / data["close"]) - 1.0
