@@ -196,6 +196,14 @@ export default function App() {
   const [logs, setLogs] = useState([])
   const [curveData, setCurveData] = useState([])
   const [activeView, setActiveView] = useState('dashboard')
+  const [evalMetrics, setEvalMetrics] = useState(null)
+
+  useEffect(() => {
+    fetch('http://localhost:8000/dashboard/eval-metrics')
+      .then(r => r.json())
+      .then(setEvalMetrics)
+      .catch(() => {})
+  }, [])
 
   useEffect(() => {
     if (!data) return
@@ -239,6 +247,7 @@ export default function App() {
   const aapl_sentiment = agentState['AAPL']?.sentiment || null
   const nvda_sentiment = agentState['NVDA']?.sentiment || null
   const activeSentiment = aapl_sentiment || nvda_sentiment
+
 
   return (
     <div style={{ background: BG, minHeight: '100vh', fontFamily: 'monospace' }}>
@@ -285,11 +294,12 @@ export default function App() {
             </div>
             {[
               { icon: 'layout-dashboard', label: 'Mission control', view: 'dashboard' },
-              { icon: 'chart-line',       label: 'Equity curve',    view: 'equity' },
+              { icon: 'chart-line',       label: 'Equity curve',   view: 'equity' },
               { icon: 'brain',            label: 'Agent decisions', view: 'agents' },
               { icon: 'news',             label: 'Sentiment feed',  view: 'sentiment' },
               { icon: 'shield',           label: 'Risk monitor',    view: 'risk' },
               { icon: 'list',             label: 'Trade ledger',    view: 'ledger' },
+              { icon: 'microscope',       label: 'Model eval',      view: 'eval' },
             ].map(({ icon, label, view }) => (
               <div key={view} onClick={() => setActiveView(view)} style={{
                 display: 'flex', alignItems: 'center', gap: 8,
@@ -650,6 +660,133 @@ export default function App() {
               </div>
             </div>
           )}
+
+          {/* ── Model eval view ── */}
+          {activeView === 'eval' && (() => {
+            const logreg = evalMetrics?.logreg || []
+            const rlCurve = evalMetrics?.rl_curve || []
+            const rlSum = evalMetrics?.rl_summary || {}
+
+            const rocColor = auc => auc >= 0.55 ? ACCENT : auc >= 0.52 ? AMBER : RED
+            const rocBar = auc => Math.max(0, Math.min(100, (auc - 0.5) / 0.1 * 100))
+
+            return (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+
+                {/* LogReg table */}
+                <div style={{ background: CARD, border: `0.5px solid ${BORDER}`, borderRadius: 8, padding: 14 }}>
+                  <CardTitle icon="math-function">LogReg models — test set metrics</CardTitle>
+                  <div style={{ fontSize: 10, color: DIM, marginBottom: 10 }}>
+                    5-min direction prediction · threshold: prob_up ≥ 0.70 · horizon: 5 min · baseline = 0.50 (random)
+                  </div>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                    <thead>
+                      <tr style={{ borderBottom: `0.5px solid ${BORDER}` }}>
+                        {['Symbol', 'ROC-AUC', '', 'Accuracy', 'Test rows', 'Train rows', 'Version'].map(h => (
+                          <th key={h} style={{ padding: '4px 8px', textAlign: 'left', fontSize: 10, color: DIM, fontWeight: 400, letterSpacing: '0.06em', textTransform: 'uppercase' }}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {logreg.map(m => (
+                        <tr key={m.symbol} style={{ borderBottom: `0.5px solid #0d1a2e` }}>
+                          <td style={{ padding: '7px 8px', color: BLUE, fontWeight: 500, ...mono }}>{m.symbol}</td>
+                          <td style={{ padding: '7px 8px', color: rocColor(m.roc_auc), fontWeight: 500, ...mono }}>
+                            {m.roc_auc != null ? m.roc_auc.toFixed(4) : '—'}
+                          </td>
+                          <td style={{ padding: '7px 8px', width: 80 }}>
+                            <div style={{ height: 4, background: '#1e2a3a', borderRadius: 2, overflow: 'hidden' }}>
+                              <div style={{ width: `${rocBar(m.roc_auc || 0.5)}%`, height: '100%', background: rocColor(m.roc_auc), borderRadius: 2 }} />
+                            </div>
+                          </td>
+                          <td style={{ padding: '7px 8px', color: LIGHT, ...mono }}>{(m.accuracy * 100).toFixed(2)}%</td>
+                          <td style={{ padding: '7px 8px', color: MID, ...mono }}>{m.test_rows.toLocaleString()}</td>
+                          <td style={{ padding: '7px 8px', color: MID, ...mono }}>{m.train_rows.toLocaleString()}</td>
+                          <td style={{ padding: '7px 8px', color: DIM, ...mono }}>{m.version}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {logreg.length === 0 && <div style={{ color: DIM, fontSize: 12, padding: '8px 0' }}>No model artifacts found.</div>}
+                  <div style={{ marginTop: 10, padding: '8px 10px', background: '#1e2a3a20', borderRadius: 6, border: `0.5px solid ${BORDER}`, fontSize: 11, color: DIM, lineHeight: 1.6 }}>
+                    All models near ROC-AUC 0.50 — barely above random. Re-train after applying the warmup filter (first 30 bars/day dropped) to remove cold-EMA noise from the training set.
+                  </div>
+                </div>
+
+                {/* RL summary cards */}
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10 }}>
+                  {[
+                    { label: 'PPO timesteps',    value: rlSum.total_timesteps ? `${(rlSum.total_timesteps/1000).toFixed(0)}k` : '—', color: PURPLE },
+                    { label: 'Checkpoints',      value: rlSum.n_checkpoints ?? '—', color: LIGHT },
+                    { label: 'Best mean reward', value: rlSum.best_mean_reward != null ? rlSum.best_mean_reward.toFixed(4) : '—', color: rlSum.best_mean_reward > 0 ? ACCENT : RED },
+                    { label: 'Best win rate',    value: rlSum.best_win_rate != null ? `${(rlSum.best_win_rate*100).toFixed(1)}%` : '—', color: rlSum.best_win_rate > 0.5 ? ACCENT : RED },
+                  ].map(({ label, value, color }) => (
+                    <div key={label} style={{ background: CARD, border: `0.5px solid ${BORDER}`, borderRadius: 8, padding: '12px 14px' }}>
+                      <div style={{ fontSize: 10, color: DIM, letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 6 }}>{label}</div>
+                      <div style={{ fontSize: 22, fontWeight: 500, color, ...mono }}>{value}</div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* RL eval curve */}
+                <div style={{ background: CARD, border: `0.5px solid ${BORDER}`, borderRadius: 8, padding: 14 }}>
+                  <CardTitle icon="robot">PPO reward curve — 500k training steps (25 evals × 10 episodes)</CardTitle>
+                  <div style={{ height: 180 }}>
+                    <ResponsiveContainer width="100%" height="100%">
+                      <LineChart data={rlCurve} margin={{ top: 4, right: 8, bottom: 4, left: 0 }}>
+                        <XAxis dataKey="timestep" tick={{ fontSize: 10, fill: DIM, fontFamily: 'monospace' }} tickFormatter={v => `${v/1000}k`} axisLine={false} tickLine={false} />
+                        <YAxis tick={{ fontSize: 10, fill: DIM, fontFamily: 'monospace' }} width={50} axisLine={false} tickLine={false} domain={['auto', 'auto']} />
+                        <Tooltip
+                          contentStyle={{ background: CARD, border: `0.5px solid ${BORDER}`, fontSize: 11, fontFamily: 'monospace' }}
+                          formatter={(v, name) => [v.toFixed(4), name]}
+                          labelFormatter={v => `step ${(v/1000).toFixed(0)}k`}
+                        />
+                        <ReferenceLine y={0} stroke={BORDER} strokeDasharray="3 2" />
+                        <Line type="monotone" dataKey="mean_reward" stroke={PURPLE} strokeWidth={1.5} dot={false} name="mean reward" />
+                        <Line type="monotone" dataKey="win_rate" stroke={ACCENT} strokeWidth={1.5} dot={false} name="win rate" />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                  <div style={{ display: 'flex', gap: 16, marginTop: 6 }}>
+                    {[{ color: PURPLE, label: 'mean reward (clipped ±1)' }, { color: ACCENT, label: 'win rate (episodes > 0)' }].map(({ color, label }) => (
+                      <div key={label} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <div style={{ width: 20, height: 2, background: color, borderRadius: 1 }} />
+                        <span style={{ fontSize: 11, color: MID }}>{label}</span>
+                      </div>
+                    ))}
+                    <div style={{ marginLeft: 'auto', fontSize: 11, color: DIM }}>— = break-even</div>
+                  </div>
+                  <div style={{ marginTop: 10, padding: '8px 10px', background: '#1e2a3a20', borderRadius: 6, border: `0.5px solid ${BORDER}`, fontSize: 11, color: DIM, lineHeight: 1.6 }}>
+                    Reward flat around −0.20 throughout training — agent converges to "sell immediately" degenerate policy.
+                    The updated reward function (early-exit penalty + stronger HOLD signal) will change this curve after retraining.
+                  </div>
+                </div>
+
+                {/* RL ep length chart */}
+                <div style={{ background: CARD, border: `0.5px solid ${BORDER}`, borderRadius: 8, padding: 14 }}>
+                  <CardTitle icon="clock">PPO mean episode length (holding steps)</CardTitle>
+                  <div style={{ height: 140 }}>
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={rlCurve} margin={{ top: 4, right: 8, bottom: 4, left: 0 }}>
+                        <XAxis dataKey="timestep" tick={{ fontSize: 10, fill: DIM, fontFamily: 'monospace' }} tickFormatter={v => `${v/1000}k`} axisLine={false} tickLine={false} />
+                        <YAxis tick={{ fontSize: 10, fill: DIM, fontFamily: 'monospace' }} width={36} axisLine={false} tickLine={false} />
+                        <Tooltip
+                          contentStyle={{ background: CARD, border: `0.5px solid ${BORDER}`, fontSize: 11, fontFamily: 'monospace' }}
+                          formatter={v => [`${v.toFixed(1)} steps`, 'mean ep length']}
+                          labelFormatter={v => `step ${(v/1000).toFixed(0)}k`}
+                        />
+                        <Bar dataKey="mean_ep_length" fill={BLUE} opacity={0.7} radius={[2,2,0,0]} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                  <div style={{ fontSize: 11, color: DIM, marginTop: 6 }}>
+                    Short episodes = agent exits early. Should increase after reward function fix + retraining.
+                  </div>
+                </div>
+
+              </div>
+            )
+          })()}
 
           {/* ── Trade ledger view ── */}
           {activeView === 'ledger' && (
